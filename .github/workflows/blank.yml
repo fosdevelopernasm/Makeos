@@ -1,30 +1,111 @@
-name: build
+name: Build ISO
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm gcc-multilib binutils grub-pc-bin grub-common xorriso mtools
+          sudo apt-get install -y \
+            debootstrap \
+            squashfs-tools \
+            xorriso \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            mtools \
+            dosfstools \
+            isolinux \
+            syslinux-utils \
+            rsync \
+            wget \
+            ca-certificates
 
-      - name: Build
-        run: make
+      - name: Build rootfs
+        run: |
+          sudo debootstrap --arch=amd64 --variant=minbase bionic rootfs http://archive.ubuntu.com/ubuntu/
+          sudo chroot rootfs /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup && apt-get clean"
+          sudo rm -rf rootfs/var/lib/apt/lists/*
 
-      - name: Build ISO
-        run: make iso
+      - name: Configure ISO layout
+        run: |
+          mkdir -p image/casper image/boot/grub image/isolinux
+          sudo cp -a rootfs/. image/
+          sudo mksquashfs image image/casper/filesystem.squashfs -noappend -comp xz
+          sudo rm -rf image/var/lib/apt/lists image/tmp/* image/var/tmp/*
+          sudo du -sx --block-size=1 image | cut -f1 | sudo tee image/casper/filesystem.size > /dev/null
+
+      - name: Install kernel and initrd
+        run: |
+          KERNEL=$(ls image/boot/vmlinuz-* | head -n1)
+          INITRD=$(ls image/boot/initrd.img-* | head -n1)
+          cp "$KERNEL" image/casper/vmlinuz
+          cp "$INITRD" image/casper/initrd
+
+      - name: Configure GRUB
+        run: |
+          cat > image/boot/grub/grub.cfg <<'EOF'
+          set default=0
+          set timeout=5
+          menuentry "Code Linux 0.1a" {
+            linux /casper/vmlinuz boot=casper quiet splash ---
+            initrd /casper/initrd
+          }
+          EOF
+
+      - name: Configure isolinux
+        run: |
+          cp /usr/lib/ISOLINUX/isolinux.bin image/isolinux/
+          cp /usr/lib/syslinux/modules/bios/ldlinux.c32 image/isolinux/
+          cp /usr/lib/syslinux/modules/bios/menu.c32 image/isolinux/
+          cat > image/isolinux/isolinux.cfg <<'EOF'
+          DEFAULT linux
+          PROMPT 0
+          TIMEOUT 50
+          UI menu.c32
+          MENU TITLE Code Linux 0.1a
+          LABEL linux
+            MENU LABEL Boot Code Linux 0.1a
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper quiet splash ---
+          EOF
+
+      - name: Create ISO
+        run: |
+          xorriso -as mkisofs \
+            -o code-linux-0.1a.iso \
+            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+            -c isolinux/boot.cat \
+            -b isolinux/isolinux.bin \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            -eltorito-alt-boot \
+            -e boot/grub/efi.img \
+            -no-emul-boot \
+            -isohybrid-gpt-basdat \
+            image || \
+          xorriso -as mkisofs \
+            -o code-linux-0.1a.iso \
+            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+            -c isolinux/boot.cat \
+            -b isolinux/isolinux.bin \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            image
 
       - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
-          name: myos-iso
-          path: build/myos.iso
+          name: code-linux-0.1a
+          path: code-linux-0.1a.iso
+          retention-days: 7
