@@ -30,9 +30,27 @@ jobs:
 
       - name: Build rootfs
         run: |
-          sudo debootstrap --arch=amd64 --variant=minbase bionic rootfs http://old-releases.ubuntu.com/ubuntu/
-          sudo chroot rootfs /bin/bash -c "sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g; s/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list && apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup && apt-get clean"
+          sudo debootstrap --arch=amd64 --variant=minbase --no-check-gpg bionic rootfs http://old-releases.ubuntu.com/ubuntu/
+          sudo chroot rootfs /bin/bash -c "sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g; s/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list && apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup ubiquity ubiquity-casper && apt-get clean"
           sudo rm -rf rootfs/var/lib/apt/lists/*
+
+      - name: Configure branding
+        run: |
+          sudo tee rootfs/etc/lsb-release > /dev/null <<'EOF'
+          DISTRIB_ID=CodeLinux
+          DISTRIB_RELEASE=0.1a
+          DISTRIB_CODENAME=codelinux
+          DISTRIB_DESCRIPTION="Code Linux 0.1a"
+          EOF
+          sudo tee rootfs/etc/os-release > /dev/null <<'EOF'
+          NAME="Code Linux"
+          VERSION="0.1a"
+          ID=codelinux
+          ID_LIKE=ubuntu
+          PRETTY_NAME="Code Linux 0.1a"
+          VERSION_ID="0.1a"
+          HOME_URL="https://github.com/"
+          EOF
 
       - name: Configure ISO layout
         run: |
@@ -141,19 +159,6 @@ jobs:
 
       - name: Create ISO
         run: |
-          xorriso -as mkisofs \
-            -o code-linux-0.1a.iso \
-            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-            -c isolinux/boot.cat \
-            -b isolinux/isolinux.bin \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            -eltorito-alt-boot \
-            -e boot/grub/efi.img \
-            -no-emul-boot \
-            -isohybrid-gpt-basdat \
-            image || \
           xorriso -as mkisofs \
             -o code-linux-0.1a.iso \
             -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
