@@ -32,7 +32,13 @@ jobs:
       - name: Build rootfs
         run: |
           sudo debootstrap --arch=amd64 --variant=minbase --include=gnupg noble rootfs http://archive.ubuntu.com/ubuntu/
-          sudo chroot rootfs /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup ubiquity ubiquity-casper && apt-get clean"
+          sudo mount --bind /dev rootfs/dev
+          sudo mount -t proc proc rootfs/proc
+          sudo mount -t sysfs sys rootfs/sys
+          sudo chroot rootfs /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup && apt-get clean"
+          sudo umount rootfs/sys || true
+          sudo umount rootfs/proc || true
+          sudo umount rootfs/dev || true
           sudo rm -rf rootfs/var/lib/apt/lists/*
 
       - name: Configure branding
@@ -46,7 +52,7 @@ jobs:
           sudo tee rootfs/etc/os-release > /dev/null <<'EOF'
           NAME="Code Linux"
           VERSION="0.1a"
-          ID=codelinux
+          ID=ubuntu
           ID_LIKE=ubuntu
           PRETTY_NAME="Code Linux 0.1a"
           VERSION_ID="0.1a"
@@ -63,9 +69,9 @@ jobs:
         run: |
           mkdir -p image/casper image/boot/grub image/isolinux
           sudo cp -a rootfs/. image/
-          sudo mksquashfs image image/casper/filesystem.squashfs -noappend -comp xz
           sudo rm -rf image/var/lib/apt/lists image/tmp/* image/var/tmp/*
           sudo du -sx --block-size=1 image | cut -f1 | sudo tee image/casper/filesystem.size > /dev/null
+          sudo mksquashfs image image/casper/filesystem.squashfs -noappend -comp xz
 
       - name: Install kernel and initrd
         run: |
@@ -80,31 +86,31 @@ jobs:
           set default=0
           set timeout=10
           menuentry "Code Linux 0.1a — Live" {
-            linux /casper/vmlinuz boot=casper quiet splash ---
+            linux /casper/vmlinuz boot=casper quiet splash
             initrd /casper/initrd
           }
           menuentry "Code Linux 0.1a — Live (safe graphics)" {
-            linux /casper/vmlinuz boot=casper nomodeset quiet splash ---
+            linux /casper/vmlinuz boot=casper nomodeset quiet splash
             initrd /casper/initrd
           }
           menuentry "Code Linux 0.1a — Live (verbose)" {
-            linux /casper/vmlinuz boot=casper ---
+            linux /casper/vmlinuz boot=casper
             initrd /casper/initrd
           }
           menuentry "Code Linux 0.1a — Live (no splash)" {
-            linux /casper/vmlinuz boot=casper noplymouth ---
+            linux /casper/vmlinuz boot=casper plymouth.enable=0
             initrd /casper/initrd
           }
           menuentry "Code Linux 0.1a — Live (persistent)" {
-            linux /casper/vmlinuz boot=casper persistent quiet splash ---
+            linux /casper/vmlinuz boot=casper persistent quiet splash
             initrd /casper/initrd
           }
           menuentry "Code Linux 0.1a — Live to RAM" {
-            linux /casper/vmlinuz boot=casper toram quiet splash ---
+            linux /casper/vmlinuz boot=casper toram quiet splash
             initrd /casper/initrd
           }
-          menuentry "Code Linux 0.1a — Install" {
-            linux /casper/vmlinuz boot=casper only-ubiquity quiet splash ---
+          menuentry "Code Linux 0.1a — Live (run installer manually)" {
+            linux /casper/vmlinuz boot=casper quiet splash
             initrd /casper/initrd
           }
           EOF
@@ -125,43 +131,43 @@ jobs:
             MENU LABEL Live
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper quiet splash ---
+            APPEND boot=casper quiet splash
 
           LABEL safe
             MENU LABEL Live (safe graphics)
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper nomodeset quiet splash ---
+            APPEND boot=casper nomodeset quiet splash
 
           LABEL verbose
             MENU LABEL Live (verbose)
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper ---
+            APPEND boot=casper
 
           LABEL nosplash
             MENU LABEL Live (no splash)
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper noplymouth ---
+            APPEND boot=casper plymouth.enable=0
 
           LABEL persistent
             MENU LABEL Live (persistent)
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper persistent quiet splash ---
+            APPEND boot=casper persistent quiet splash
 
           LABEL toram
             MENU LABEL Live to RAM
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper toram quiet splash ---
+            APPEND boot=casper toram quiet splash
 
           LABEL install
-            MENU LABEL Install
+            MENU LABEL Live (run installer manually)
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
-            APPEND boot=casper only-ubiquity quiet splash ---
+            APPEND boot=casper quiet splash
           EOF
 
       - name: Create ISO
