@@ -30,8 +30,8 @@ jobs:
 
       - name: Build rootfs
         run: |
-          sudo debootstrap --arch=amd64 --variant=minbase bionic rootfs http://archive.ubuntu.com/ubuntu/
-          sudo chroot rootfs /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup && apt-get clean"
+          sudo debootstrap --arch=amd64 --variant=minbase bionic rootfs http://old-releases.ubuntu.com/ubuntu/
+          sudo chroot rootfs /bin/bash -c "sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g; s/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list && apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup && apt-get clean"
           sudo rm -rf rootfs/var/lib/apt/lists/*
 
       - name: Configure ISO layout
@@ -53,9 +53,33 @@ jobs:
         run: |
           cat > image/boot/grub/grub.cfg <<'EOF'
           set default=0
-          set timeout=5
-          menuentry "Code Linux 0.1a" {
+          set timeout=10
+          menuentry "Code Linux 0.1a — Live" {
             linux /casper/vmlinuz boot=casper quiet splash ---
+            initrd /casper/initrd
+          }
+          menuentry "Code Linux 0.1a — Live (safe graphics)" {
+            linux /casper/vmlinuz boot=casper nomodeset quiet splash ---
+            initrd /casper/initrd
+          }
+          menuentry "Code Linux 0.1a — Live (verbose)" {
+            linux /casper/vmlinuz boot=casper ---
+            initrd /casper/initrd
+          }
+          menuentry "Code Linux 0.1a — Live (no splash)" {
+            linux /casper/vmlinuz boot=casper noplymouth ---
+            initrd /casper/initrd
+          }
+          menuentry "Code Linux 0.1a — Live (persistent)" {
+            linux /casper/vmlinuz boot=casper persistent quiet splash ---
+            initrd /casper/initrd
+          }
+          menuentry "Code Linux 0.1a — Live to RAM" {
+            linux /casper/vmlinuz boot=casper toram quiet splash ---
+            initrd /casper/initrd
+          }
+          menuentry "Code Linux 0.1a — Install" {
+            linux /casper/vmlinuz boot=casper only-ubiquity quiet splash ---
             initrd /casper/initrd
           }
           EOF
@@ -66,16 +90,53 @@ jobs:
           cp /usr/lib/syslinux/modules/bios/ldlinux.c32 image/isolinux/
           cp /usr/lib/syslinux/modules/bios/menu.c32 image/isolinux/
           cat > image/isolinux/isolinux.cfg <<'EOF'
-          DEFAULT linux
+          DEFAULT live
           PROMPT 0
-          TIMEOUT 50
+          TIMEOUT 100
           UI menu.c32
           MENU TITLE Code Linux 0.1a
-          LABEL linux
-            MENU LABEL Boot Code Linux 0.1a
+
+          LABEL live
+            MENU LABEL Live
             LINUX /casper/vmlinuz
             INITRD /casper/initrd
             APPEND boot=casper quiet splash ---
+
+          LABEL safe
+            MENU LABEL Live (safe graphics)
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper nomodeset quiet splash ---
+
+          LABEL verbose
+            MENU LABEL Live (verbose)
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper ---
+
+          LABEL nosplash
+            MENU LABEL Live (no splash)
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper noplymouth ---
+
+          LABEL persistent
+            MENU LABEL Live (persistent)
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper persistent quiet splash ---
+
+          LABEL toram
+            MENU LABEL Live to RAM
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper toram quiet splash ---
+
+          LABEL install
+            MENU LABEL Install
+            LINUX /casper/vmlinuz
+            INITRD /casper/initrd
+            APPEND boot=casper only-ubiquity quiet splash ---
           EOF
 
       - name: Create ISO
