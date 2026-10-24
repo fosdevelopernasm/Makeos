@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -31,8 +31,8 @@ jobs:
 
       - name: Build rootfs
         run: |
-          sudo debootstrap --arch=amd64 --variant=minbase --no-check-gpg --include=gnupg bionic rootfs http://old-releases.ubuntu.com/ubuntu/
-          sudo chroot rootfs /bin/bash -c "sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g; s/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list && apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup ubiquity ubiquity-casper && apt-get clean"
+          sudo debootstrap --arch=amd64 --variant=minbase --include=gnupg noble rootfs http://archive.ubuntu.com/ubuntu/
+          sudo chroot rootfs /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup ubiquity ubiquity-casper && apt-get clean"
           sudo rm -rf rootfs/var/lib/apt/lists/*
 
       - name: Configure branding
