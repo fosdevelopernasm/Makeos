@@ -1,4 +1,4 @@
-name: Build ISO
+name: Build Code Linux 0.1a
 
 on:
   push:
@@ -26,11 +26,12 @@ jobs:
             syslinux-utils \
             rsync \
             wget \
-            ca-certificates
+            ca-certificates \
+            gnupg
 
       - name: Build rootfs
         run: |
-          sudo debootstrap --arch=amd64 --variant=minbase --no-check-gpg bionic rootfs http://old-releases.ubuntu.com/ubuntu/
+          sudo debootstrap --arch=amd64 --variant=minbase --no-check-gpg --include=gnupg bionic rootfs http://old-releases.ubuntu.com/ubuntu/
           sudo chroot rootfs /bin/bash -c "sed -i 's/archive.ubuntu.com/old-releases.ubuntu.com/g; s/security.ubuntu.com/old-releases.ubuntu.com/g' /etc/apt/sources.list && apt-get update && apt-get install -y --no-install-recommends linux-image-generic casper lupin-casper discover laptop-detect os-prober network-manager net-tools wireless-tools locales console-setup ubiquity ubiquity-casper && apt-get clean"
           sudo rm -rf rootfs/var/lib/apt/lists/*
 
@@ -50,6 +51,12 @@ jobs:
           PRETTY_NAME="Code Linux 0.1a"
           VERSION_ID="0.1a"
           HOME_URL="https://github.com/"
+          EOF
+          sudo tee rootfs/etc/issue > /dev/null <<'EOF'
+          Code Linux 0.1a \n \l
+          EOF
+          sudo tee rootfs/etc/issue.net > /dev/null <<'EOF'
+          Code Linux 0.1a
           EOF
 
       - name: Configure ISO layout
@@ -160,6 +167,7 @@ jobs:
       - name: Create ISO
         run: |
           xorriso -as mkisofs \
+            -V "Code Linux 0.1a" \
             -o code-linux-0.1a.iso \
             -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
             -c isolinux/boot.cat \
