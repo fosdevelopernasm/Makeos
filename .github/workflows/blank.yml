@@ -1,559 +1,67 @@
-name: build
-on: [push, pull_request]
+name: Build Custom Alpine Rootfs
+
+on:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y nasm gcc g++ grub-pc-bin grub-common xorriso mtools
-
-      - name: Write sources
+      - name: Download alpine-make-rootfs
         run: |
-          cat > boot.asm <<'EOF'
-          bits 32
-          section .multiboot
-          align 4
-              dd 0x1BADB002
-              dd 0x00000007
-              dd -(0x1BADB002 + 0x00000007)
-              dd 0
-              dd 0
-              dd 0
-              dd 0
-              dd 0
-              dd 0
-              dd 0
-              dd 1280
-              dd 720
-              dd 32
+          wget -q https://raw.githubusercontent.com/alpinelinux/alpine-make-rootfs/v0.8.1/alpine-make-rootfs
+          chmod +x alpine-make-rootfs
 
-          section .bss
-          align 16
-          stack_bottom:
-              resb 32768
-          stack_top:
-
-          section .text
-          global _start
-          extern kmain
-          _start:
-              mov esp, stack_top
-              push ebx
-              push eax
-              call kmain
-          .hang:
-              cli
-              hlt
-              jmp .hang
-          EOF
-
-          cat > linker.ld <<'EOF'
-          ENTRY(_start)
-          SECTIONS
-          {
-              . = 1M;
-              .multiboot : { *(.multiboot) }
-              .text : { *(.text) }
-              .rodata : { *(.rodata) }
-              .data : { *(.data) }
-              .bss : { *(COMMON) *(.bss) }
-          }
-          EOF
-
-          cat > kernel.c <<'EOF'
-          #include <stdint.h>
-
-          struct multiboot_info {
-              uint32_t flags; uint32_t mem_lower; uint32_t mem_upper; uint32_t boot_device; uint32_t cmdline;
-              uint32_t mods_count; uint32_t mods_addr; uint32_t syms[4]; uint32_t mmap_length; uint32_t mmap_addr;
-              uint32_t drives_length; uint32_t drives_addr; uint32_t config_table; uint32_t boot_loader_name;
-              uint32_t apm_table; uint32_t vbe_control_info; uint32_t vbe_mode_info; uint16_t vbe_mode;
-              uint16_t vbe_interface_seg; uint16_t vbe_interface_off; uint16_t vbe_interface_len;
-              uint64_t framebuffer_addr; uint32_t framebuffer_pitch; uint32_t framebuffer_width;
-              uint32_t framebuffer_height; uint8_t framebuffer_bpp; uint8_t framebuffer_type;
-          } __attribute__((packed));
-
-          extern void gui_main(struct multiboot_info* mbi);
-          extern void idt_init(void);
-          extern void keyboard_init(void);
-          extern void mouse_init(void);
-
-          void kmain(uint32_t magic, struct multiboot_info* mbi) {
-              (void)magic;
-              idt_init();
-              keyboard_init();
-              mouse_init();
-              gui_main(mbi);
-              for (;;) __asm__ volatile("cli; hlt");
-          }
-          EOF
-
-          cat > idt.c <<'EOF'
-          #include <stdint.h>
-
-          struct idt_entry { uint16_t base_lo; uint16_t sel; uint8_t zero; uint8_t flags; uint16_t base_hi; } __attribute__((packed));
-          struct idt_ptr   { uint16_t limit; uint32_t base; } __attribute__((packed));
-
-          static struct idt_entry idt[256];
-          static struct idt_ptr   idtp;
-
-          extern void irq0(void); extern void irq1(void); extern void irq2(void); extern void irq3(void);
-          extern void irq4(void); extern void irq5(void); extern void irq6(void); extern void irq7(void);
-          extern void irq8(void); extern void irq9(void); extern void irq10(void); extern void irq11(void);
-          extern void irq12(void); extern void irq13(void); extern void irq14(void); extern void irq15(void);
-
-          static inline void outb(uint16_t p, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p)); }
-
-          static void set_gate(int n, uint32_t base) {
-              idt[n].base_lo = base & 0xFFFF;
-              idt[n].sel = 0x08;
-              idt[n].zero = 0;
-              idt[n].flags = 0x8E;
-              idt[n].base_hi = (base >> 16) & 0xFFFF;
-          }
-
-          static void remap_pic(void) {
-              outb(0x20, 0x11); outb(0xA0, 0x11);
-              outb(0x21, 0x20); outb(0xA1, 0x28);
-              outb(0x21, 0x04); outb(0xA1, 0x02);
-              outb(0x21, 0x01); outb(0xA1, 0x01);
-              outb(0x21, 0x00); outb(0xA1, 0x00);
-          }
-
-          void irq_dispatch(int irq) {
-              extern void timer_tick(void);
-              extern void keyboard_irq(void);
-              extern void mouse_irq(void);
-              if (irq == 0) timer_tick();
-              else if (irq == 1) keyboard_irq();
-              else if (irq == 12) mouse_irq();
-              if (irq >= 8) outb(0xA0, 0x20);
-              outb(0x20, 0x20);
-          }
-
-          void idt_init(void) {
-              for (int i = 0; i < 256; i++) set_gate(i, 0);
-              set_gate(32, (uint32_t)irq0);
-              set_gate(33, (uint32_t)irq1);
-              set_gate(34, (uint32_t)irq2);
-              set_gate(35, (uint32_t)irq3);
-              set_gate(36, (uint32_t)irq4);
-              set_gate(37, (uint32_t)irq5);
-              set_gate(38, (uint32_t)irq6);
-              set_gate(39, (uint32_t)irq7);
-              set_gate(40, (uint32_t)irq8);
-              set_gate(41, (uint32_t)irq9);
-              set_gate(42, (uint32_t)irq10);
-              set_gate(43, (uint32_t)irq11);
-              set_gate(44, (uint32_t)irq12);
-              set_gate(45, (uint32_t)irq13);
-              set_gate(46, (uint32_t)irq14);
-              set_gate(47, (uint32_t)irq15);
-              idtp.limit = sizeof(idt) - 1;
-              idtp.base = (uint32_t)&idt;
-              __asm__ volatile("lidt %0"::"m"(idtp));
-              remap_pic();
-              __asm__ volatile("sti");
-          }
-          EOF
-
-          cat > irq.asm <<'EOF'
-          bits 32
-
-          extern irq_dispatch
-          global irq0
-          global irq1
-          global irq2
-          global irq3
-          global irq4
-          global irq5
-          global irq6
-          global irq7
-          global irq8
-          global irq9
-          global irq10
-          global irq11
-          global irq12
-          global irq13
-          global irq14
-          global irq15
-
-          %macro IRQ 2
-          irq%1:
-              pusha
-              push ds
-              push es
-              push fs
-              push gs
-              mov ax, 0x10
-              mov ds, ax
-              mov es, ax
-              mov fs, ax
-              mov gs, ax
-              push dword %2
-              call irq_dispatch
-              add esp, 4
-              pop gs
-              pop fs
-              pop es
-              pop ds
-              popa
-              iretd
-          %endmacro
-
-          IRQ 0, 0
-          IRQ 1, 1
-          IRQ 2, 2
-          IRQ 3, 3
-          IRQ 4, 4
-          IRQ 5, 5
-          IRQ 6, 6
-          IRQ 7, 7
-          IRQ 8, 8
-          IRQ 9, 9
-          IRQ 10, 10
-          IRQ 11, 11
-          IRQ 12, 12
-          IRQ 13, 13
-          IRQ 14, 14
-          IRQ 15, 15
-          EOF
-
-          cat > timer.c <<'EOF'
-          #include <stdint.h>
-          static volatile uint64_t ticks = 0;
-          static inline void outb(uint16_t p, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p)); }
-          void timer_tick(void) { ticks++; }
-          uint64_t timer_ticks(void) { return ticks; }
-          void timer_init(void) {
-              uint32_t div = 1193182 / 1000;
-              outb(0x43, 0x36);
-              outb(0x40, div & 0xFF);
-              outb(0x40, (div >> 8) & 0xFF);
-          }
-          EOF
-
-          cat > ps2.c <<'EOF'
-          #include <stdint.h>
-
-          static inline void outb(uint16_t p, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p)); }
-          static inline uint8_t inb(uint16_t p){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(p)); return r; }
-
-          static void wait_write(void){ for (volatile int i=0;i<100000;i++) if(!(inb(0x64)&2)) return; }
-          static void wait_read(void){ for (volatile int i=0;i<100000;i++) if(inb(0x64)&1) return; }
-
-          static volatile int mx = 640, my = 360;
-          static volatile int buttons = 0;
-          static uint8_t mcycle = 0;
-          static uint8_t mbytes[3];
-          static volatile int keycode = 0;
-
-          void keyboard_irq(void) {
-              uint8_t s = inb(0x64);
-              if (s & 1) keycode = inb(0x60);
-          }
-
-          int kbd_get_key(void) {
-              int k = keycode;
-              keycode = 0;
-              return k;
-          }
-
-          void mouse_irq(void) {
-              uint8_t s = inb(0x64);
-              if (!(s & 1)) return;
-              uint8_t b = inb(0x60);
-              if (mcycle == 0 && !(b & 0x08)) return;
-              mbytes[mcycle++] = b;
-              if (mcycle == 3) {
-                  mcycle = 0;
-                  int dx = (int8_t)mbytes[1];
-                  int dy = -(int8_t)mbytes[2];
-                  mx += dx; my += dy;
-                  if (mx < 0) mx = 0; if (mx > 1279) mx = 1279;
-                  if (my < 0) my = 0; if (my > 719) my = 719;
-                  buttons = mbytes[0] & 0x07;
-              }
-          }
-
-          int mouse_get_x(void) { return mx; }
-          int mouse_get_y(void) { return my; }
-          int mouse_get_buttons(void) { return buttons; }
-
-          static void mouse_write(uint8_t v){ wait_write(); outb(0x64,0x60); wait_write(); outb(0x60,v); }
-
-          void mouse_init(void) {
-              wait_write(); outb(0x64, 0xA8);
-              wait_write(); outb(0x64, 0x20);
-              wait_read();
-              uint8_t st = inb(0x60) | 2;
-              wait_write(); outb(0x64, 0x60);
-              wait_write(); outb(0x60, st);
-              mouse_write(0xF6); wait_read(); inb(0x60);
-              mouse_write(0xF4); wait_read(); inb(0x60);
-              mcycle = 0;
-          }
-
-          void keyboard_init(void) {
-              while (inb(0x64) & 1) inb(0x60);
-          }
-          EOF
-
-          cat > gui.cpp <<'EOF'
-          #include <stdint.h>
-
-          struct multiboot_info {
-              uint32_t flags; uint32_t mem_lower; uint32_t mem_upper; uint32_t boot_device; uint32_t cmdline;
-              uint32_t mods_count; uint32_t mods_addr; uint32_t syms[4]; uint32_t mmap_length; uint32_t mmap_addr;
-              uint32_t drives_length; uint32_t drives_addr; uint32_t config_table; uint32_t boot_loader_name;
-              uint32_t apm_table; uint32_t vbe_control_info; uint32_t vbe_mode_info; uint16_t vbe_mode;
-              uint16_t vbe_interface_seg; uint16_t vbe_interface_off; uint16_t vbe_interface_len;
-              uint64_t framebuffer_addr; uint32_t framebuffer_pitch; uint32_t framebuffer_width;
-              uint32_t framebuffer_height; uint8_t framebuffer_bpp; uint8_t framebuffer_type;
-          } __attribute__((packed));
-
-          extern "C" int mouse_get_x(void);
-          extern "C" int mouse_get_y(void);
-          extern "C" int mouse_get_buttons(void);
-          extern "C" void timer_init(void);
-
-          static uint32_t* fb = nullptr;
-          static uint32_t W = 1280, H = 720, PITCH = 0;
-          static uint32_t* backbuffer = nullptr;
-
-          static inline void put_px(int x, int y, uint32_t c) {
-              if (x < 0 || y < 0 || (uint32_t)x >= W || (uint32_t)y >= H) return;
-              backbuffer[y*W + x] = c;
-          }
-
-          static void fill_rect(int x, int y, int w, int h, uint32_t c) {
-              for (int j = 0; j < h; j++) {
-                  uint32_t* row = backbuffer + (y+j)*W + x;
-                  for (int i = 0; i < w; i++) row[i] = c;
-              }
-          }
-
-          static void rect_outline(int x, int y, int w, int h, uint32_t c) {
-              for (int i = 0; i < w; i++) { put_px(x+i, y, c); put_px(x+i, y+h-1, c); }
-              for (int j = 0; j < h; j++) { put_px(x, y+j, c); put_px(x+w-1, y+j, c); }
-          }
-
-          static const uint8_t FONT[96][5] = {
-          {0,0,0,0,0},{0,0,0x5F,0,0},{0,0x07,0,0x07,0},{0x14,0x7F,0x14,0x7F,0x14},{0x24,0x2A,0x7F,0x2A,0x12},
-          {0x23,0x13,0x08,0x64,0x62},{0x36,0x49,0x55,0x22,0x50},{0,0x05,0x03,0,0},{0,0x1C,0x22,0x41,0},
-          {0,0x41,0x22,0x1C,0},{0x08,0x2A,0x1C,0x2A,0x08},{0x08,0x08,0x3E,0x08,0x08},{0,0x50,0x30,0,0},
-          {0x08,0x08,0x08,0x08,0x08},{0,0x60,0x60,0,0},{0x20,0x10,0x08,0x04,0x02},{0x3E,0x51,0x49,0x45,0x3E},
-          {0,0x42,0x7F,0x40,0},{0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},{0x18,0x14,0x12,0x7F,0x10},
-          {0x27,0x45,0x45,0x45,0x39},{0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},{0x36,0x49,0x49,0x49,0x36},
-          {0x06,0x49,0x49,0x29,0x1E},{0,0x36,0x36,0,0},{0,0x56,0x36,0,0},{0x08,0x14,0x22,0x41,0},
-          {0x14,0x14,0x14,0x14,0x14},{0,0x41,0x22,0x14,0x08},{0x02,0x01,0x51,0x09,0x06},{0x32,0x49,0x79,0x41,0x3E},
-          {0x7E,0x11,0x11,0x11,0x7E},{0x7F,0x49,0x49,0x49,0x36},{0x3E,0x41,0x41,0x41,0x22},{0x7F,0x41,0x41,0x22,0x1C},
-          {0x7F,0x49,0x49,0x49,0x41},{0x7F,0x09,0x09,0x09,0x01},{0x3E,0x41,0x49,0x49,0x7A},{0x7F,0x08,0x08,0x08,0x7F},
-          {0,0x41,0x7F,0x41,0},{0x20,0x40,0x41,0x3F,0x01},{0x7F,0x08,0x14,0x22,0x41},{0x7F,0x40,0x40,0x40,0x40},
-          {0x7F,0x02,0x0C,0x02,0x7F},{0x7F,0x04,0x08,0x10,0x7F},{0x3E,0x41,0x41,0x41,0x3E},{0x7F,0x09,0x09,0x09,0x06},
-          {0x3E,0x41,0x51,0x21,0x5E},{0x7F,0x09,0x19,0x29,0x46},{0x46,0x49,0x49,0x49,0x31},{0x01,0x01,0x7F,0x01,0x01},
-          {0x3F,0x40,0x40,0x40,0x3F},{0x1F,0x20,0x40,0x20,0x1F},{0x3F,0x40,0x38,0x40,0x3F},{0x63,0x14,0x08,0x14,0x63},
-          {0x07,0x08,0x70,0x08,0x07},{0x61,0x51,0x49,0x45,0x43},{0,0x7F,0x41,0x41,0},{0x02,0x04,0x08,0x10,0x20},
-          {0,0x41,0x41,0x7F,0},{0x04,0x02,0x01,0x02,0x04},{0x40,0x40,0x40,0x40,0x40},{0,0x01,0x02,0x04,0},
-          {0x20,0x54,0x54,0x54,0x78},{0x7F,0x48,0x44,0x44,0x38},{0x38,0x44,0x44,0x44,0x20},{0x38,0x44,0x44,0x48,0x7F},
-          {0x38,0x54,0x54,0x54,0x18},{0x08,0x7E,0x09,0x01,0x02},{0x0C,0x52,0x52,0x52,0x3E},{0x7F,0x08,0x04,0x04,0x78},
-          {0,0x44,0x7D,0x40,0},{0x20,0x40,0x44,0x3D,0},{0x7F,0x10,0x28,0x44,0},{0,0x41,0x7F,0x40,0},
-          {0x7C,0x04,0x18,0x04,0x78},{0x7C,0x08,0x04,0x04,0x78},{0x38,0x44,0x44,0x44,0x38},{0x7C,0x14,0x14,0x14,0x08},
-          {0x08,0x14,0x14,0x18,0x7C},{0x7C,0x08,0x04,0x04,0x08},{0x48,0x54,0x54,0x54,0x20},{0x04,0x3F,0x44,0x40,0x20},
-          {0x3C,0x40,0x40,0x20,0x7C},{0x1C,0x20,0x40,0x20,0x1C},{0x3C,0x40,0x30,0x40,0x3C},{0x44,0x28,0x10,0x28,0x44},
-          {0x0C,0x50,0x50,0x50,0x3C},{0x44,0x64,0x54,0x4C,0x44},{0x08,0x36,0x41,0,0},{0,0,0x7F,0,0},{0,0x41,0x36,0x08,0}
-          };
-
-          static void draw_char(int x, int y, char ch, uint32_t col, int scale) {
-              if (ch < 32 || ch > 127) ch = '?';
-              const uint8_t* g = FONT[(int)ch - 32];
-              for (int col5 = 0; col5 < 5; col5++) {
-                  uint8_t bits = g[col5];
-                  for (int row = 0; row < 7; row++) {
-                      if (bits & (1 << row)) {
-                          for (int sy = 0; sy < scale; sy++)
-                              for (int sx = 0; sx < scale; sx++)
-                                  put_px(x + col5*scale + sx, y + row*scale + sy, col);
-                      }
-                  }
-              }
-          }
-
-          static void draw_text(int x, int y, const char* s, uint32_t col, int scale) {
-              while (*s) { draw_char(x, y, *s++, col, scale); x += 6*scale; }
-          }
-
-          static void fill_circle(int cx, int cy, int r, uint32_t c) {
-              for (int y = -r; y <= r; y++)
-                  for (int x = -r; x <= r; x++)
-                      if (x*x + y*y <= r*r) put_px(cx+x, cy+y, c);
-          }
-
-          static void blit() {
-              for (uint32_t y = 0; y < H; y++) {
-                  uint32_t* src = backbuffer + y*W;
-                  uint32_t* dst = fb + (y * (PITCH/4));
-                  for (uint32_t x = 0; x < W; x++) dst[x] = src[x];
-              }
-          }
-
-          static void draw_wallpaper() {
-              uint32_t top = 0x00205A8A;
-              uint32_t bot = 0x00408ACF;
-              for (uint32_t y = 0; y < H; y++) {
-                  uint32_t t = y * 255 / H;
-                  uint32_t r = ((top>>16)&0xFF)*(255-t)/255 + ((bot>>16)&0xFF)*t/255;
-                  uint32_t g = ((top>>8)&0xFF)*(255-t)/255 + ((bot>>8)&0xFF)*t/255;
-                  uint32_t b = (top&0xFF)*(255-t)/255 + (bot&0xFF)*t/255;
-                  uint32_t c = (r<<16)|(g<<8)|b;
-                  uint32_t* row = backbuffer + y*W;
-                  for (uint32_t x = 0; x < W; x++) row[x] = c;
-              }
-          }
-
-          static bool start_menu_open = false;
-          static bool app_open = false;
-
-          static bool hit(int mx, int my, int x, int y, int w, int h) {
-              return mx >= x && mx < x+w && my >= y && my < y+h;
-          }
-
-          static void draw_start_menu() {
-              int mx0 = 8, my0 = H - 40 - 260;
-              fill_rect(mx0, my0, 240, 260, 0x00202020);
-              rect_outline(mx0, my0, 240, 260, 0x00707070);
-              fill_rect(mx0, my0, 240, 32, 0x003060C0);
-              draw_text(mx0 + 12, my0 + 8, "User", 0x00FFFFFF, 2);
-              const char* items[] = { "Programs", "Documents", "Settings", "Help", "Shut Down" };
-              for (int i = 0; i < 5; i++) {
-                  int y = my0 + 44 + i*38;
-                  fill_rect(mx0 + 6, y, 228, 32, 0x00282828);
-                  draw_text(mx0 + 16, y + 8, items[i], 0x00E0E0E0, 2);
-              }
-          }
-
-          static void draw_taskbar() {
-              fill_rect(0, H - 40, W, 40, 0x00101010);
-              fill_rect(0, H - 40, W, 1, 0x00404040);
-              uint32_t start_col = start_menu_open ? 0x003060C0 : 0x00202020;
-              fill_rect(4, H - 36, 100, 32, start_col);
-              rect_outline(4, H - 36, 100, 32, 0x00505050);
-              fill_circle(24, H - 20, 8, 0x00FFB900);
-              fill_circle(24, H - 20, 6, 0x00FF8C00);
-              draw_text(44, H - 30, "Start", 0x00FFFFFF, 2);
-              if (app_open) {
-                  fill_rect(112, H - 36, 180, 32, 0x003060C0);
-                  draw_text(122, H - 30, "Hello World", 0x00FFFFFF, 2);
-              }
-          }
-
-          static void draw_app_window() {
-              int wx = W/2 - 240, wy = H/2 - 160, ww = 480, wh = 320;
-              fill_rect(wx, wy, ww, wh, 0x00F0F0F0);
-              rect_outline(wx, wy, ww, wh, 0x00606060);
-              fill_rect(wx, wy, ww, 32, 0x003060C0);
-              draw_text(wx + 12, wy + 8, "Hello World Program", 0x00FFFFFF, 2);
-              fill_rect(wx + ww - 40, wy + 4, 32, 24, 0x00C03030);
-              draw_text(wx + ww - 30, wy + 8, "X", 0x00FFFFFF, 2);
-              draw_text(wx + 24, wy + 80, "Hello, World!", 0x00202020, 3);
-              draw_text(wx + 24, wy + 140, "This is a demo window.", 0x00404040, 2);
-              fill_rect(wx + 24, wy + wh - 60, 120, 40, 0x003060C0);
-              rect_outline(wx + 24, wy + wh - 60, 120, 40, 0x00204080);
-              draw_text(wx + 48, wy + wh - 48, "Close", 0x00FFFFFF, 2);
-          }
-
-          static void draw_cursor(int mx, int my) {
-              for (int y = 0; y < 16; y++) {
-                  for (int x = 0; x < 11; x++) {
-                      bool inside = (x < 1 && y < 1) || (y > x/2 && x < 11 && y < 16);
-                      if (inside) {
-                          put_px(mx+x, my+y, 0x00000000);
-                          if (x < 10 && y < 15) put_px(mx+x+1, my+y, 0x00FFFFFF);
-                      }
-                  }
-              }
-          }
-
-          static void redraw(int mx, int my) {
-              draw_wallpaper();
-              fill_rect(40, 40, 90, 90, 0x00A0C0E0);
-              rect_outline(40, 40, 90, 90, 0x006080A0);
-              draw_text(56, 64, "My PC", 0x00FFFFFF, 2);
-              fill_rect(160, 40, 90, 90, 0x00E0C0A0);
-              rect_outline(160, 40, 90, 90, 0x00A08060);
-              draw_text(176, 64, "Docs", 0x00FFFFFF, 2);
-              if (app_open) draw_app_window();
-              if (start_menu_open) draw_start_menu();
-              draw_taskbar();
-              draw_cursor(mx, my);
-              blit();
-          }
-
-          extern "C" void gui_main(multiboot_info* mbi) {
-              fb = (uint32_t*)(uint32_t)mbi->framebuffer_addr;
-              W = mbi->framebuffer_width;
-              H = mbi->framebuffer_height;
-              PITCH = mbi->framebuffer_pitch;
-              static uint32_t bb[1280*720];
-              backbuffer = bb;
-              timer_init();
-              int prev_mx = mouse_get_x();
-              int prev_my = mouse_get_y();
-              uint8_t prev_btn = 0;
-              redraw(prev_mx, prev_my);
-              for (;;) {
-                  int mx = mouse_get_x();
-                  int my = mouse_get_y();
-                  int buttons = mouse_get_buttons();
-                  if (mx != prev_mx || my != prev_my || buttons != (int)prev_btn) {
-                      if ((buttons & 1) && !(prev_btn & 1)) {
-                          int wx = W/2 - 240, wy = H/2 - 160;
-                          if (app_open && hit(mx, my, wx + 440, wy + 4, 32, 24)) app_open = false;
-                          else if (app_open && hit(mx, my, wx + 24, wy + 260, 120, 40)) app_open = false;
-                          else if (hit(mx, my, 4, H - 36, 100, 32)) start_menu_open = !start_menu_open;
-                          else if (hit(mx, my, 40, 40, 90, 90)) { app_open = true; start_menu_open = false; }
-                          else if (hit(mx, my, 160, 40, 90, 90)) { app_open = true; start_menu_open = false; }
-                          else start_menu_open = false;
-                      }
-                      redraw(mx, my);
-                      prev_mx = mx; prev_my = my; prev_btn = buttons;
-                  }
-              }
-          }
-          EOF
-
-          cat > grub.cfg <<'EOF'
-          set timeout=0
-          set default=0
-          menuentry "MyOS" {
-              multiboot /boot/kernel.elf
-              set gfxpayload=1280x720x32
-              boot
-          }
-          EOF
-
-      - name: Compile
+      - name: Build custom rootfs with modifications
         run: |
-          nasm -f elf32 boot.asm -o boot.o
-          nasm -f elf32 irq.asm -o irq.o
-          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c kernel.c -o kernel.o
-          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c idt.c -o idt.o
-          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c timer.c -o timer.o
-          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c ps2.c -o ps2.o
-          g++ -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-exceptions -fno-rtti -O2 -c gui.cpp -o gui.o
-          ld -m elf_i386 -T linker.ld -o kernel.elf boot.o irq.o kernel.o idt.o timer.o ps2.o gui.o
+          sudo ./alpine-make-rootfs \
+            --branch v3.20 \
+            --packages 'bash curl nano htop' \
+            --timezone 'Europe/Moscow' \
+            --script-chroot \
+            alpine-mylinux-$(date +%Y%m%d).tar.gz - <<'SHELL'
+              # ===== ТВОИ МОДИФИКАЦИИ ВНУТРИ ROOTFS =====
+              
+              # 1. Меняем hostname
+              echo "mylinux" > /etc/hostname
+              
+              # 2. Создаём свой скрипт-приветствие
+              cat > /etc/profile.d/mylinux.sh <<'EOF'
+          echo "========================================="
+          echo "  Добро пожаловать в MyLinux (Alpine)"
+          echo "  Команды: help echo time calc note"
+          echo "========================================="
+          EOF
+              chmod +x /etc/profile.d/mylinux.sh
+              
+              # 3. Кладём кастомный скрипт с командами
+              cat > /usr/local/bin/mini <<'EOF'
+          #!/bin/bash
+          case "$1" in
+            help)   echo "Команды: help echo time calc note exit reboot" ;;
+            echo)   shift; echo "$@" ;;
+            time)   date '+%Y-%m-%d %H:%M:%S %Z' ;;
+            calc)   shift; echo $(( $@ )) ;;
+            note)   echo "$(date) - $2" >> /var/log/notes.log; echo "OK" ;;
+            exit)   exit 0 ;;
+            reboot) echo "Перезагрузка... (в chroot недоступна)" ;;
+            *)      echo "Неизвестно: $1 (введи: mini help)" ;;
+          esac
+          EOF
+              chmod +x /usr/local/bin/mini
+              
+              # 4. Добавляем алиас для mini в /etc/profile
+              echo "alias mini='/usr/local/bin/mini'" >> /etc/profile
+              
+              # 5. Создаём пустой лог для заметок
+              touch /var/log/notes.log
+          SHELL
 
-      - name: ISO
-        run: |
-          mkdir -p iso/boot/grub
-          cp kernel.elf iso/boot/
-          cp grub.cfg iso/boot/grub/
-          grub-mkrescue -o os.iso iso
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: os-iso
-          path: os.iso
+          name: alpine-mylinux-rootfs
+          path: alpine-mylinux-*.tar.gz
