@@ -67,44 +67,19 @@ jobs:
           #include <stdint.h>
 
           struct multiboot_info {
-              uint32_t flags;
-              uint32_t mem_lower;
-              uint32_t mem_upper;
-              uint32_t boot_device;
-              uint32_t cmdline;
-              uint32_t mods_count;
-              uint32_t mods_addr;
-              uint32_t syms[4];
-              uint32_t mmap_length;
-              uint32_t mmap_addr;
-              uint32_t drives_length;
-              uint32_t drives_addr;
-              uint32_t config_table;
-              uint32_t boot_loader_name;
-              uint32_t apm_table;
-              uint32_t vbe_control_info;
-              uint32_t vbe_mode_info;
-              uint16_t vbe_mode;
-              uint16_t vbe_interface_seg;
-              uint16_t vbe_interface_off;
-              uint16_t vbe_interface_len;
-              uint64_t framebuffer_addr;
-              uint32_t framebuffer_pitch;
-              uint32_t framebuffer_width;
-              uint32_t framebuffer_height;
-              uint8_t  framebuffer_bpp;
-              uint8_t  framebuffer_type;
+              uint32_t flags; uint32_t mem_lower; uint32_t mem_upper; uint32_t boot_device; uint32_t cmdline;
+              uint32_t mods_count; uint32_t mods_addr; uint32_t syms[4]; uint32_t mmap_length; uint32_t mmap_addr;
+              uint32_t drives_length; uint32_t drives_addr; uint32_t config_table; uint32_t boot_loader_name;
+              uint32_t apm_table; uint32_t vbe_control_info; uint32_t vbe_mode_info; uint16_t vbe_mode;
+              uint16_t vbe_interface_seg; uint16_t vbe_interface_off; uint16_t vbe_interface_len;
+              uint64_t framebuffer_addr; uint32_t framebuffer_pitch; uint32_t framebuffer_width;
+              uint32_t framebuffer_height; uint8_t framebuffer_bpp; uint8_t framebuffer_type;
           } __attribute__((packed));
 
           extern void gui_main(struct multiboot_info* mbi);
           extern void idt_init(void);
           extern void keyboard_init(void);
           extern void mouse_init(void);
-          extern void ps2_poll_all(void);
-          extern int  mouse_get_x(void);
-          extern int  mouse_get_y(void);
-          extern int  mouse_get_buttons(void);
-          extern int  kbd_get_key(void);
 
           void kmain(uint32_t magic, struct multiboot_info* mbi) {
               (void)magic;
@@ -131,7 +106,6 @@ jobs:
           extern void irq12(void); extern void irq13(void); extern void irq14(void); extern void irq15(void);
 
           static inline void outb(uint16_t p, uint8_t v){ __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p)); }
-          static inline uint8_t inb(uint16_t p){ uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(p)); return r; }
 
           static void set_gate(int n, uint32_t base) {
               idt[n].base_lo = base & 0xFFFF;
@@ -275,8 +249,6 @@ jobs:
           static volatile int buttons = 0;
           static uint8_t mcycle = 0;
           static uint8_t mbytes[3];
-          static uint8_t prev_b = 0;
-
           static volatile int keycode = 0;
 
           void keyboard_irq(void) {
@@ -328,10 +300,6 @@ jobs:
           void keyboard_init(void) {
               while (inb(0x64) & 1) inb(0x60);
           }
-
-          void ps2_poll_all(void) {}
-          void timer_init(void);
-          extern void timer_init(void);
           EOF
 
           cat > gui.cpp <<'EOF'
@@ -350,9 +318,7 @@ jobs:
           extern "C" int mouse_get_x(void);
           extern "C" int mouse_get_y(void);
           extern "C" int mouse_get_buttons(void);
-          extern "C" int kbd_get_key(void);
           extern "C" void timer_init(void);
-          extern "C" uint64_t timer_ticks(void);
 
           static uint32_t* fb = nullptr;
           static uint32_t W = 1280, H = 720, PITCH = 0;
@@ -375,7 +341,6 @@ jobs:
               for (int j = 0; j < h; j++) { put_px(x, y+j, c); put_px(x+w-1, y+j, c); }
           }
 
-          // 5x7 bitmap font
           static const uint8_t FONT[96][5] = {
           {0,0,0,0,0},{0,0,0x5F,0,0},{0,0x07,0,0x07,0},{0x14,0x7F,0x14,0x7F,0x14},{0x24,0x2A,0x7F,0x2A,0x12},
           {0x23,0x13,0x08,0x64,0x62},{0x36,0x49,0x55,0x22,0x50},{0,0x05,0x03,0,0},{0,0x1C,0x22,0x41,0},
@@ -451,9 +416,6 @@ jobs:
 
           static bool start_menu_open = false;
           static bool app_open = false;
-          static int prev_mx = 0, prev_my = 0;
-          static uint8_t prev_btn = 0;
-          static bool need_redraw = true;
 
           static bool hit(int mx, int my, int x, int y, int w, int h) {
               return mx >= x && mx < x+w && my >= y && my < y+h;
@@ -506,9 +468,7 @@ jobs:
           static void draw_cursor(int mx, int my) {
               for (int y = 0; y < 16; y++) {
                   for (int x = 0; x < 11; x++) {
-                      bool inside = false;
-                      if (x < 1 && y < 1) inside = true;
-                      if (y > x/2 && x < 11 && y < 16) inside = true;
+                      bool inside = (x < 1 && y < 1) || (y > x/2 && x < 11 && y < 16);
                       if (inside) {
                           put_px(mx+x, my+y, 0x00000000);
                           if (x < 10 && y < 15) put_px(mx+x+1, my+y, 0x00FFFFFF);
@@ -540,25 +500,26 @@ jobs:
               static uint32_t bb[1280*720];
               backbuffer = bb;
               timer_init();
-              prev_mx = mouse_get_x();
-              prev_my = mouse_get_y();
+              int prev_mx = mouse_get_x();
+              int prev_my = mouse_get_y();
+              uint8_t prev_btn = 0;
               redraw(prev_mx, prev_my);
               for (;;) {
                   int mx = mouse_get_x();
                   int my = mouse_get_y();
                   int buttons = mouse_get_buttons();
-                  if (mx != prev_mx || my != prev_my || buttons != prev_btn || need_redraw) {
+                  if (mx != prev_mx || my != prev_my || buttons != (int)prev_btn) {
                       if ((buttons & 1) && !(prev_btn & 1)) {
-                          if (hit(mx, my, W/2 - 240 + 440, H/2 - 160 + 4, 32, 24) && app_open) app_open = false;
-                          else if (hit(mx, my, W/2 - 240 + 24, H/2 - 160 + 320 - 60, 120, 40) && app_open) app_open = false;
+                          int wx = W/2 - 240, wy = H/2 - 160;
+                          if (app_open && hit(mx, my, wx + 440, wy + 4, 32, 24)) app_open = false;
+                          else if (app_open && hit(mx, my, wx + 24, wy + 260, 120, 40)) app_open = false;
                           else if (hit(mx, my, 4, H - 36, 100, 32)) start_menu_open = !start_menu_open;
-                          else if (app_open && hit(mx, my, 112, H - 36, 180, 32)) {}
                           else if (hit(mx, my, 40, 40, 90, 90)) { app_open = true; start_menu_open = false; }
                           else if (hit(mx, my, 160, 40, 90, 90)) { app_open = true; start_menu_open = false; }
                           else start_menu_open = false;
                       }
                       redraw(mx, my);
-                      prev_mx = mx; prev_my = my; prev_btn = buttons; need_redraw = false;
+                      prev_mx = mx; prev_my = my; prev_btn = buttons;
                   }
               }
           }
@@ -575,3 +536,24 @@ jobs:
           EOF
 
       - name: Compile
+        run: |
+          nasm -f elf32 boot.asm -o boot.o
+          nasm -f elf32 irq.asm -o irq.o
+          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c kernel.c -o kernel.o
+          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c idt.c -o idt.o
+          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c timer.c -o timer.o
+          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -O2 -c ps2.c -o ps2.o
+          g++ -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-exceptions -fno-rtti -O2 -c gui.cpp -o gui.o
+          ld -m elf_i386 -T linker.ld -o kernel.elf boot.o irq.o kernel.o idt.o timer.o ps2.o gui.o
+
+      - name: ISO
+        run: |
+          mkdir -p iso/boot/grub
+          cp kernel.elf iso/boot/
+          cp grub.cfg iso/boot/grub/
+          grub-mkrescue -o os.iso iso
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: os-iso
+          path: os.iso
