@@ -1,4 +1,4 @@
-name: Build Custom Alpine Rootfs
+name: Build Custom Alpine ISO
 
 on:
   workflow_dispatch:
@@ -6,62 +6,73 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download alpine-make-rootfs
-        run: |
-          wget -q https://raw.githubusercontent.com/alpinelinux/alpine-make-rootfs/v0.8.1/alpine-make-rootfs
-          chmod +x alpine-make-rootfs
+      - name: Setup Alpine Linux
+        uses: jirutka/setup-alpine@v1
+        with:
+          branch: v3.20
 
-      - name: Build custom rootfs with modifications
+      - name: Install tools & build ISO
+        shell: alpine.sh --root {0}
         run: |
-          sudo ./alpine-make-rootfs \
-            --branch v3.20 \
-            --packages 'bash curl nano htop' \
-            --timezone 'Europe/Moscow' \
-            --script-chroot \
-            alpine-mylinux-$(date +%Y%m%d).tar.gz - <<'SHELL'
-              # ===== ТВОИ МОДИФИКАЦИИ ВНУТРИ ROOTFS =====
-              
-              # 1. Меняем hostname
-              echo "mylinux" > /etc/hostname
-              
-              # 2. Создаём свой скрипт-приветствие
-              cat > /etc/profile.d/mylinux.sh <<'EOF'
-          echo "========================================="
-          echo "  Добро пожаловать в MyLinux (Alpine)"
-          echo "  Команды: help echo time calc note"
-          echo "========================================="
-          EOF
-              chmod +x /etc/profile.d/mylinux.sh
-              
-              # 3. Кладём кастомный скрипт с командами
-              cat > /usr/local/bin/mini <<'EOF'
-          #!/bin/bash
-          case "$1" in
-            help)   echo "Команды: help echo time calc note exit reboot" ;;
-            echo)   shift; echo "$@" ;;
-            time)   date '+%Y-%m-%d %H:%M:%S %Z' ;;
-            calc)   shift; echo $(( $@ )) ;;
-            note)   echo "$(date) - $2" >> /var/log/notes.log; echo "OK" ;;
-            exit)   exit 0 ;;
-            reboot) echo "Перезагрузка... (в chroot недоступна)" ;;
-            *)      echo "Неизвестно: $1 (введи: mini help)" ;;
-          esac
-          EOF
-              chmod +x /usr/local/bin/mini
-              
-              # 4. Добавляем алиас для mini в /etc/profile
-              echo "alias mini='/usr/local/bin/mini'" >> /etc/profile
-              
-              # 5. Создаём пустой лог для заметок
-              touch /var/log/notes.log
-          SHELL
+          # 1. Установка зависимостей
+          apk add --no-cache alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub doas git bash
 
-      - name: Upload rootfs artifact
+          # 2. Настройка прав root
+          echo "permit nopass root" > /etc/doas.conf
+
+          # 3. Генерация ключей подписи (обязательно)
+          abuild-keygen -i -a -n -q
+
+          # 4. Клонирование aports (содержит скрипты mkimage)
+          git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git /aports
+          cd /aports
+          doas apk update
+
+          # 5. Создание собственного профиля (можно менять пакеты здесь)
+          cat > scripts/mkimg.mylinux.sh << 'EOF'
+          profile_mylinux() {
+              profile_standard
+              kernel_cmdline="console=tty0 console=ttyS0,115200"
+              syslinux_serial="0 115200"
+              apks="$apks bash nano curl wget htop"
+          }
+          EOF
+          chmod +x scripts/mkimg.mylinux.sh
+
+          # 6. Подготовка выходной директории
+          mkdir -p /out
+          export TMPDIR=/tmp
+
+          # 7. Запуск сборки ISO
+          sh scripts/mkimage.sh \
+            --tag v3.20 \
+            --outdir /out \
+            --arch x86_64 \
+            --repository https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
+            --repository https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
+            --profile mylinux
+
+          # 8. Проверка
+          ls -lh /out/
+
+          # 9. Копирование в директорию, доступную хосту
+          mkdir -p /home/runner/alpine-iso
+          cp /out/*.iso /home/runner/alpine-iso/ || true
+
+      - name: Verify ISO exists on host
+        run: |
+          ls -lh /home/runner/alpine-iso/
+          test -n "$(ls -A /home/runner/alpine-iso/*.iso 2>/dev/null)" || { echo "ISO not found"; exit 1; }
+
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: alpine-mylinux-rootfs
-          path: alpine-mylinux-*.tar.gz
+          name: alpine-mylinux-iso
+          path: /home/runner/alpine-iso/*.iso
+          retention-days: 7
