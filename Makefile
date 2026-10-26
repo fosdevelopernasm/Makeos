@@ -1,261 +1,210 @@
-ASM := nasm
-CC := gcc
-LD := ld
+name: Build OS ISO
 
-ASMFLAGS := -f elf32
-CFLAGS := -m32 -ffreestanding -fno-pic -fno-stack-protector -nostdlib -Wall -Wextra -O2
-LDFLAGS := -m elf_i386 -T linker.ld
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-BUILD := build
-SRC := src
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-ASM_SRCS := $(SRC)/boot.asm
-C_SRCS := $(SRC)/kernel.c
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm gcc g++ binutils grub-pc-bin grub-common xorriso mtools qemu-system-x86
 
-ASM_OBJS := $(patsubst $(SRC)/%.asm,$(BUILD)/%.o,$(ASM_SRCS))
-C_OBJS := $(patsubst $(SRC)/%.c,$(BUILD)/%.o,$(C_SRCS))
-OBJS := $(ASM_OBJS) $(C_OBJS)
+      - name: Generate sources
+        run: |
+          mkdir -p build iso/boot/grub src
 
-KERNEL := $(BUILD)/kernel.elf
-ISO := $(BUILD)/myos.iso
+          cat > src/linker.ld << 'EOF'
+          ENTRY(_start)
+          SECTIONS
+          {
+            . = 1M;
+            .multiboot : { *(.multiboot) }
+            .text : { *(.text*) }
+            .rodata : { *(.rodata*) }
+            .data : { *(.data*) }
+            .bss : { *(COMMON) *(.bss*) }
+          }
+          EOF
 
-GEN_FILES := $(SRC)/boot.asm $(SRC)/kernel.c linker.ld grub.cfg .github/workflows/build.yml
+          cat > src/boot.asm << 'EOF'
+          section .multiboot
+          align 4
+          dd 0x1BADB002
+          dd 0x00000003
+          dd -(0x1BADB002 + 0x00000003)
 
-.PHONY: all clean iso run gen
+          section .text
+          global _start
+          extern kmain
+          extern irq_keyboard_handler
 
-all: gen $(KERNEL)
+          _start:
+            cli
+            mov esp, stack_top
+            push ebx
+            push eax
+            call kmain
+            cli
+          .hang:
+            hlt
+            jmp .hang
 
-gen: $(GEN_FILES)
+          global keyboard_isr
+          keyboard_isr:
+            pusha
+            in al, 0x60
+            push eax
+            call irq_keyboard_handler
+            add esp, 4
+            mov al, 0x20
+            out 0x20, al
+            popa
+            iret
 
-$(SRC)/boot.asm:
-	@mkdir -p $(SRC)
-	@printf '%s\n' \
-	'BITS 32' \
-	'' \
-	'section .multiboot_header' \
-	'align 8' \
-	'header_start:' \
-	'    dd 0xe85250d6' \
-	'    dd 0' \
-	'    dd header_end - header_start' \
-	'    dd 0x100000000 - (0xe85250d6 + 0 + (header_end - header_start))' \
-	'' \
-	'    align 8' \
-	'    dw 5' \
-	'    dw 0' \
-	'    dd 20' \
-	'    dd 0' \
-	'    dd 0' \
-	'    dd 0' \
-	'' \
-	'    align 8' \
-	'    dw 0' \
-	'    dw 0' \
-	'    dd 8' \
-	'header_end:' \
-	'' \
-	'section .bss' \
-	'align 16' \
-	'stack_bottom:' \
-	'    resb 16384' \
-	'stack_top:' \
-	'' \
-	'section .text' \
-	'global _start' \
-	'extern kmain' \
-	'' \
-	'_start:' \
-	'    cli' \
-	'    mov esp, stack_top' \
-	'    push ebx' \
-	'    push eax' \
-	'    call kmain' \
-	'' \
-	'.hang:' \
-	'    hlt' \
-	'    jmp .hang' \
-	> $@
+          section .bss
+          align 16
+          stack_bottom:
+            resb 16384
+          stack_top:
+          EOF
 
-$(SRC)/kernel.c:
-	@mkdir -p $(SRC)
-	@printf '%s\n' \
-	'#include <stdint.h>' \
-	'' \
-	'#define VGA_TEXT_BASE 0xB8000' \
-	'#define VGA_TEXT_COLS 80' \
-	'#define VGA_TEXT_ROWS 25' \
-	'#define VGA_GFX_BASE  0xA0000' \
-	'#define VGA_GFX_W     320' \
-	'#define VGA_GFX_H     200' \
-	'' \
-	'#define MULTIBOOT2_BOOTLOADER_MAGIC 0x36d76289' \
-	'' \
-	'struct mb2_tag {' \
-	'    uint32_t type;' \
-	'    uint32_t size;' \
-	'};' \
-	'' \
-	'static volatile uint16_t *const vga_text = (volatile uint16_t *)VGA_TEXT_BASE;' \
-	'static volatile uint8_t *const vga_gfx = (volatile uint8_t *)VGA_GFX_BASE;' \
-	'' \
-	'static void text_clear(void) {' \
-	'    for (uint32_t i = 0; i < VGA_TEXT_COLS * VGA_TEXT_ROWS; i++)' \
-	'        vga_text[i] = 0x0F20;' \
-	'}' \
-	'' \
-	'static void text_puts(const char *s) {' \
-	'    uint32_t pos = 0;' \
-	'    while (*s) {' \
-	'        char c = *s++;' \
-	'        if (c == 0x0A) {' \
-	'            pos += VGA_TEXT_COLS - (pos % VGA_TEXT_COLS);' \
-	'            continue;' \
-	'        }' \
-	'        vga_text[pos++] = (uint16_t)0x0F00 | (uint8_t)c;' \
-	'        if (pos >= VGA_TEXT_COLS * VGA_TEXT_ROWS) pos = 0;' \
-	'    }' \
-	'}' \
-	'' \
-	'static void gfx_clear(uint8_t color) {' \
-	'    for (uint32_t i = 0; i < VGA_GFX_W * VGA_GFX_H; i++)' \
-	'        vga_gfx[i] = color;' \
-	'}' \
-	'' \
-	'static void gfx_putpixel(uint32_t x, uint32_t y, uint8_t color) {' \
-	'    if (x < VGA_GFX_W && y < VGA_GFX_H)' \
-	'        vga_gfx[y * VGA_GFX_W + x] = color;' \
-	'}' \
-	'' \
-	'static void gfx_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t color) {' \
-	'    for (uint32_t j = 0; j < h; j++)' \
-	'        for (uint32_t i = 0; i < w; i++)' \
-	'            gfx_putpixel(x + i, y + j, color);' \
-	'}' \
-	'' \
-	'static void normal_mode(void) {' \
-	'    text_clear();' \
-	'    text_puts("MyOS - Normal Mode\n");' \
-	'    text_puts("VGA text 80x25\n");' \
-	'    text_puts("Kernel running.\n");' \
-	'}' \
-	'' \
-	'static void vga_mode(void) {' \
-	'    gfx_clear(0x00);' \
-	'    gfx_rect(10, 10, 100, 50, 0x0F);' \
-	'    gfx_rect(150, 10, 100, 50, 0x04);' \
-	'    gfx_rect(10, 100, 240, 60, 0x02);' \
-	'    gfx_rect(60, 40, 40, 80, 0x0E);' \
-	'}' \
-	'' \
-	'void kmain(uint32_t magic, void *mb_info) {' \
-	'    if (magic != MULTIBOOT2_BOOTLOADER_MAGIC) {' \
-	'        normal_mode();' \
-	'        for (;;) __asm__ volatile("hlt");' \
-	'    }' \
-	'' \
-	'    uint8_t *p = (uint8_t *)mb_info;' \
-	'    uint32_t total = *(uint32_t *)p;' \
-	'    p += 8;' \
-	'' \
-	'    uint8_t fb_present = 0;' \
-	'    while ((uint32_t)(p - (uint8_t *)mb_info) < total) {' \
-	'        struct mb2_tag *tag = (struct mb2_tag *)p;' \
-	'        if (tag->type == 0) break;' \
-	'        if (tag->type == 8) { fb_present = 1; break; }' \
-	'        p += (tag->size + 7) & ~7u;' \
-	'    }' \
-	'' \
-	'    if (fb_present) vga_mode();' \
-	'    else normal_mode();' \
-	'' \
-	'    for (;;) __asm__ volatile("hlt");' \
-	'}' \
-	> $@
+          cat > src/kernel.c << 'EOF'
+          #include <stdint.h>
 
-linker.ld:
-	@printf '%s\n' \
-	'ENTRY(_start)' \
-	'' \
-	'SECTIONS {' \
-	'    . = 1M;' \
-	'    .multiboot_header : { KEEP(*(.multiboot_header)) }' \
-	'    .text : { *(.text) }' \
-	'    .rodata : { *(.rodata) }' \
-	'    .data : { *(.data) }' \
-	'    .bss : { *(COMMON) *(.bss) }' \
-	'}' \
-	> $@
+          #define VGA ((volatile uint16_t*)0xB8000)
+          #define COLOR 0x0A00
+          #define PIC1_CMD 0x20
+          #define PIC1_DATA 0x21
+          #define PIC2_CMD 0xA0
+          #define PIC2_DATA 0xA1
+          #define IDT_SIZE 256
 
-grub.cfg:
-	@printf '%s\n' \
-	'set timeout=5' \
-	'set default=0' \
-	'' \
-	'menuentry "MyOS normal mode" {' \
-	'    multiboot2 /boot/kernel.elf' \
-	'    boot' \
-	'}' \
-	'' \
-	'menuentry "MyOS vga mode" {' \
-	'    multiboot2 /boot/kernel.elf' \
-	'    set gfxpayload=320x200x8' \
-	'    boot' \
-	'}' \
-	> $@
+          struct idt_entry { uint16_t base_lo; uint16_t sel; uint8_t zero; uint8_t flags; uint16_t base_hi; } __attribute__((packed));
+          struct idt_ptr { uint16_t limit; uint32_t base; } __attribute__((packed));
 
-.github/workflows/build.yml:
-	@mkdir -p .github/workflows
-	@printf '%s\n' \
-	'name: build' \
-	'' \
-	'on:' \
-	'  push:' \
-	'    branches: [main]' \
-	'  pull_request:' \
-	'    branches: [main]' \
-	'' \
-	'jobs:' \
-	'  build:' \
-	'    runs-on: ubuntu-latest' \
-	'    steps:' \
-	'      - uses: actions/checkout@v4' \
-	'      - name: Install deps' \
-	'        run: |' \
-	'          sudo apt-get update' \
-	'          sudo apt-get install -y nasm gcc-multilib binutils grub-pc-bin grub-common xorriso mtools' \
-	'      - name: Build' \
-	'        run: make' \
-	'      - name: Build ISO' \
-	'        run: make iso' \
-	'      - name: Upload' \
-	'        uses: actions/upload-artifact@v4' \
-	'        with:' \
-	'          name: myos-iso' \
-	'          path: build/myos.iso' \
-	> $@
+          static struct idt_entry idt[IDT_SIZE];
+          static struct idt_ptr idtp;
+          static uint32_t cursor = 0;
+          static char cmd_buf[256];
+          static uint32_t cmd_len = 0;
 
-$(BUILD):
-	@mkdir -p $(BUILD)
+          extern void keyboard_isr(void);
 
-$(BUILD)/%.o: $(SRC)/%.asm | $(BUILD)
-	$(ASM) $(ASMFLAGS) $< -o $@
+          static void outb(uint16_t port, uint8_t val) { __asm__ volatile("outb %0,%1"::"a"(val),"Nd"(port)); }
+          static uint8_t inb(uint16_t port) { uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r; }
 
-$(BUILD)/%.o: $(SRC)/%.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+          static void idt_set(int i, uint32_t base, uint16_t sel, uint8_t flags) {
+            idt[i].base_lo = base & 0xFFFF;
+            idt[i].base_hi = (base >> 16) & 0xFFFF;
+            idt[i].sel = sel;
+            idt[i].zero = 0;
+            idt[i].flags = flags;
+          }
 
-$(KERNEL): $(OBJS) linker.ld
-	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+          static void idt_init(void) {
+            idtp.limit = sizeof(idt) - 1;
+            idtp.base = (uint32_t)&idt;
+            for (int i = 0; i < IDT_SIZE; i++) idt_set(i, 0, 0x08, 0x8E);
+            idt_set(0x21, (uint32_t)keyboard_isr, 0x08, 0x8E);
+            __asm__ volatile("lidt %0"::"m"(idtp));
+          }
 
-iso: gen $(ISO)
+          static void pic_remap(void) {
+            outb(PIC1_CMD, 0x11); outb(PIC2_CMD, 0x11);
+            outb(PIC1_DATA, 0x20); outb(PIC2_DATA, 0x28);
+            outb(PIC1_DATA, 0x04); outb(PIC2_DATA, 0x02);
+            outb(PIC1_DATA, 0x01); outb(PIC2_DATA, 0x01);
+            outb(PIC1_DATA, 0xFD);
+            outb(PIC2_DATA, 0xFF);
+          }
 
-$(ISO): $(KERNEL) grub.cfg
-	@mkdir -p $(BUILD)/iso/boot/grub
-	cp $(KERNEL) $(BUILD)/iso/boot/kernel.elf
-	cp grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
-	grub-mkrescue -o $(ISO) $(BUILD)/iso
+          static void putc(char c) {
+            if (c == '\n') { cursor += 80 - (cursor % 80); return; }
+            if (c == '\b') { if (cursor > 0) { cursor--; VGA[cursor] = COLOR | ' '; } return; }
+            VGA[cursor++] = COLOR | (uint8_t)c;
+          }
 
-run: $(ISO)
-	qemu-system-i386 -cdrom $(ISO)
+          static void puts(const char* s) { while (*s) putc(*s++); }
 
-clean:
-	rm -rf $(BUILD) $(GEN_FILES)
+          static const char kbd_map[] = {
+            0, 27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b',
+            '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+            0,'a','s','d','f','g','h','j','k','l',';','\'','`',
+            0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '
+          };
+
+          void irq_keyboard_handler(uint32_t scancode) {
+            uint8_t code = scancode & 0xFF;
+            if (code & 0x80) return;
+            if (code > 57) return;
+            char c = kbd_map[code];
+            if (c == '\n') {
+              putc('\n');
+              cmd_buf[cmd_len] = 0;
+              if (cmd_len > 0) {
+                if (cmd_buf[0]=='h' && cmd_buf[1]=='e' && cmd_buf[2]=='l' && cmd_buf[3]=='p' && cmd_buf[4]==0) {
+                  puts("commands: help, clear, echo, about\n> ");
+                } else if (cmd_buf[0]=='c' && cmd_buf[1]=='l' && cmd_buf[2]=='e' && cmd_buf[3]=='a' && cmd_buf[4]=='r' && cmd_buf[5]==0) {
+                  for (int i = 0; i < 80*25; i++) VGA[i] = COLOR | ' ';
+                  cursor = 0;
+                  puts("> ");
+                } else if (cmd_buf[0]=='a' && cmd_buf[1]=='b' && cmd_buf[2]=='o' && cmd_buf[3]=='u' && cmd_buf[4]=='t' && cmd_buf[5]==0) {
+                  puts("myos 0.2 - interactive kernel\n> ");
+                } else if (cmd_buf[0]=='e' && cmd_buf[1]=='c' && cmd_buf[2]=='h' && cmd_buf[3]=='o' && cmd_buf[4]==' ') {
+                  puts(cmd_buf + 5);
+                  putc('\n');
+                  puts("> ");
+                } else {
+                  puts("unknown\n> ");
+                }
+              } else {
+                puts("> ");
+              }
+              cmd_len = 0;
+            } else if (c && cmd_len < 255) {
+              putc(c);
+              cmd_buf[cmd_len++] = c;
+            }
+          }
+
+          void kmain(uint32_t magic, uint32_t addr) {
+            (void)magic; (void)addr;
+            for (int i = 0; i < 80*25; i++) VGA[i] = COLOR | ' ';
+            idt_init();
+            pic_remap();
+            __asm__ volatile("sti");
+            puts("myos 0.2\n> ");
+            for (;;) __asm__ volatile("hlt");
+          }
+          EOF
+
+      - name: Compile
+        run: |
+          nasm -f elf32 src/boot.asm -o build/boot.o
+          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-exceptions -fno-rtti -c src/kernel.c -o build/kernel.o
+          ld -m elf_i386 -n -T src/linker.ld -o build/kernel.elf build/boot.o build/kernel.o
+
+      - name: Create ISO
+        run: |
+          cp build/kernel.elf iso/boot/kernel.elf
+          cat > iso/boot/grub/grub.cfg << 'EOF'
+          set timeout=0
+          set default=0
+          menuentry "myos" {
+            multiboot /boot/kernel.elf
+            boot
+          }
+          EOF
+          grub-mkrescue -o myos.iso iso
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: myos-iso
+          path: myos.iso
