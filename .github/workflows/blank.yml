@@ -1,78 +1,210 @@
-name: Build Custom Alpine ISO
+name: Build OS ISO
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Alpine Linux
-        uses: jirutka/setup-alpine@v1
-        with:
-          branch: v3.20
-
-      - name: Install tools & build ISO
-        shell: alpine.sh --root {0}
+      - name: Install toolchain
         run: |
-          # 1. Установка зависимостей
-          apk add --no-cache alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub doas git bash
+          sudo apt-get update
+          sudo apt-get install -y nasm gcc g++ binutils grub-pc-bin grub-common xorriso mtools qemu-system-x86
 
-          # 2. Настройка прав root
-          echo "permit nopass root" > /etc/doas.conf
+      - name: Generate sources
+        run: |
+          mkdir -p build iso/boot/grub src
 
-          # 3. Генерация ключей подписи (обязательно)
-          abuild-keygen -i -a -n -q
-
-          # 4. Клонирование aports (содержит скрипты mkimage)
-          git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git /aports
-          cd /aports
-          doas apk update
-
-          # 5. Создание собственного профиля (можно менять пакеты здесь)
-          cat > scripts/mkimg.mylinux.sh << 'EOF'
-          profile_mylinux() {
-              profile_standard
-              kernel_cmdline="console=tty0 console=ttyS0,115200"
-              syslinux_serial="0 115200"
-              apks="$apks bash nano curl wget htop"
+          cat > src/linker.ld << 'EOF'
+          ENTRY(_start)
+          SECTIONS
+          {
+            . = 1M;
+            .multiboot : { *(.multiboot) }
+            .text : { *(.text*) }
+            .rodata : { *(.rodata*) }
+            .data : { *(.data*) }
+            .bss : { *(COMMON) *(.bss*) }
           }
           EOF
-          chmod +x scripts/mkimg.mylinux.sh
 
-          # 6. Подготовка выходной директории
-          mkdir -p /out
-          export TMPDIR=/tmp
+          cat > src/boot.asm << 'EOF'
+          section .multiboot
+          align 4
+          dd 0x1BADB002
+          dd 0x00000003
+          dd -(0x1BADB002 + 0x00000003)
 
-          # 7. Запуск сборки ISO
-          sh scripts/mkimage.sh \
-            --tag v3.20 \
-            --outdir /out \
-            --arch x86_64 \
-            --repository https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
-            --repository https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
-            --profile mylinux
+          section .text
+          global _start
+          extern kmain
+          extern irq_keyboard_handler
 
-          # 8. Проверка
-          ls -lh /out/
+          _start:
+            cli
+            mov esp, stack_top
+            push ebx
+            push eax
+            call kmain
+            cli
+          .hang:
+            hlt
+            jmp .hang
 
-          # 9. Копирование в директорию, доступную хосту
-          mkdir -p /home/runner/alpine-iso
-          cp /out/*.iso /home/runner/alpine-iso/ || true
+          global keyboard_isr
+          keyboard_isr:
+            pusha
+            in al, 0x60
+            push eax
+            call irq_keyboard_handler
+            add esp, 4
+            mov al, 0x20
+            out 0x20, al
+            popa
+            iret
 
-      - name: Verify ISO exists on host
+          section .bss
+          align 16
+          stack_bottom:
+            resb 16384
+          stack_top:
+          EOF
+
+          cat > src/kernel.c << 'EOF'
+          #include <stdint.h>
+
+          #define VGA ((volatile uint16_t*)0xB8000)
+          #define COLOR 0x0A00
+          #define PIC1_CMD 0x20
+          #define PIC1_DATA 0x21
+          #define PIC2_CMD 0xA0
+          #define PIC2_DATA 0xA1
+          #define IDT_SIZE 256
+
+          struct idt_entry { uint16_t base_lo; uint16_t sel; uint8_t zero; uint8_t flags; uint16_t base_hi; } __attribute__((packed));
+          struct idt_ptr { uint16_t limit; uint32_t base; } __attribute__((packed));
+
+          static struct idt_entry idt[IDT_SIZE];
+          static struct idt_ptr idtp;
+          static uint32_t cursor = 0;
+          static char cmd_buf[256];
+          static uint32_t cmd_len = 0;
+
+          extern void keyboard_isr(void);
+
+          static void outb(uint16_t port, uint8_t val) { __asm__ volatile("outb %0,%1"::"a"(val),"Nd"(port)); }
+          static uint8_t inb(uint16_t port) { uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r; }
+
+          static void idt_set(int i, uint32_t base, uint16_t sel, uint8_t flags) {
+            idt[i].base_lo = base & 0xFFFF;
+            idt[i].base_hi = (base >> 16) & 0xFFFF;
+            idt[i].sel = sel;
+            idt[i].zero = 0;
+            idt[i].flags = flags;
+          }
+
+          static void idt_init(void) {
+            idtp.limit = sizeof(idt) - 1;
+            idtp.base = (uint32_t)&idt;
+            for (int i = 0; i < IDT_SIZE; i++) idt_set(i, 0, 0x08, 0x8E);
+            idt_set(0x21, (uint32_t)keyboard_isr, 0x08, 0x8E);
+            __asm__ volatile("lidt %0"::"m"(idtp));
+          }
+
+          static void pic_remap(void) {
+            outb(PIC1_CMD, 0x11); outb(PIC2_CMD, 0x11);
+            outb(PIC1_DATA, 0x20); outb(PIC2_DATA, 0x28);
+            outb(PIC1_DATA, 0x04); outb(PIC2_DATA, 0x02);
+            outb(PIC1_DATA, 0x01); outb(PIC2_DATA, 0x01);
+            outb(PIC1_DATA, 0xFD);
+            outb(PIC2_DATA, 0xFF);
+          }
+
+          static void putc(char c) {
+            if (c == '\n') { cursor += 80 - (cursor % 80); return; }
+            if (c == '\b') { if (cursor > 0) { cursor--; VGA[cursor] = COLOR | ' '; } return; }
+            VGA[cursor++] = COLOR | (uint8_t)c;
+          }
+
+          static void puts(const char* s) { while (*s) putc(*s++); }
+
+          static const char kbd_map[] = {
+            0, 27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b',
+            '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+            0,'a','s','d','f','g','h','j','k','l',';','\'','`',
+            0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '
+          };
+
+          void irq_keyboard_handler(uint32_t scancode) {
+            uint8_t code = scancode & 0xFF;
+            if (code & 0x80) return;
+            if (code > 57) return;
+            char c = kbd_map[code];
+            if (c == '\n') {
+              putc('\n');
+              cmd_buf[cmd_len] = 0;
+              if (cmd_len > 0) {
+                if (cmd_buf[0]=='h' && cmd_buf[1]=='e' && cmd_buf[2]=='l' && cmd_buf[3]=='p' && cmd_buf[4]==0) {
+                  puts("commands: help, clear, echo, about\n> ");
+                } else if (cmd_buf[0]=='c' && cmd_buf[1]=='l' && cmd_buf[2]=='e' && cmd_buf[3]=='a' && cmd_buf[4]=='r' && cmd_buf[5]==0) {
+                  for (int i = 0; i < 80*25; i++) VGA[i] = COLOR | ' ';
+                  cursor = 0;
+                  puts("> ");
+                } else if (cmd_buf[0]=='a' && cmd_buf[1]=='b' && cmd_buf[2]=='o' && cmd_buf[3]=='u' && cmd_buf[4]=='t' && cmd_buf[5]==0) {
+                  puts("myos 0.2 - interactive kernel\n> ");
+                } else if (cmd_buf[0]=='e' && cmd_buf[1]=='c' && cmd_buf[2]=='h' && cmd_buf[3]=='o' && cmd_buf[4]==' ') {
+                  puts(cmd_buf + 5);
+                  putc('\n');
+                  puts("> ");
+                } else {
+                  puts("unknown\n> ");
+                }
+              } else {
+                puts("> ");
+              }
+              cmd_len = 0;
+            } else if (c && cmd_len < 255) {
+              putc(c);
+              cmd_buf[cmd_len++] = c;
+            }
+          }
+
+          void kmain(uint32_t magic, uint32_t addr) {
+            (void)magic; (void)addr;
+            for (int i = 0; i < 80*25; i++) VGA[i] = COLOR | ' ';
+            idt_init();
+            pic_remap();
+            __asm__ volatile("sti");
+            puts("myos 0.2\n> ");
+            for (;;) __asm__ volatile("hlt");
+          }
+          EOF
+
+      - name: Compile
         run: |
-          ls -lh /home/runner/alpine-iso/
-          test -n "$(ls -A /home/runner/alpine-iso/*.iso 2>/dev/null)" || { echo "ISO not found"; exit 1; }
+          nasm -f elf32 src/boot.asm -o build/boot.o
+          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-exceptions -fno-rtti -c src/kernel.c -o build/kernel.o
+          ld -m elf_i386 -n -T src/linker.ld -o build/kernel.elf build/boot.o build/kernel.o
 
-      - name: Upload ISO artifact
-        uses: actions/upload-artifact@v4
+      - name: Create ISO
+        run: |
+          cp build/kernel.elf iso/boot/kernel.elf
+          cat > iso/boot/grub/grub.cfg << 'EOF'
+          set timeout=0
+          set default=0
+          menuentry "myos" {
+            multiboot /boot/kernel.elf
+            boot
+          }
+          EOF
+          grub-mkrescue -o myos.iso iso
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: alpine-mylinux-iso
-          path: /home/runner/alpine-iso/*.iso
-          retention-days: 7
+          name: myos-iso
+          path: myos.iso
