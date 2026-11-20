@@ -1,235 +1,519 @@
-name: Build OS ISO
+name: DenTech Android Emulator Alpha 0.2
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    name: Build Android Emulator
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
-      - name: Install toolchain
+    steps:
+      - name: Download Limbo source
+        uses: actions/checkout@v4
+        with:
+          repository: limboemu/limbo
+          ref: v6.0.1-LimboEmulator
+          path: limbo
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses
+
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-29" \
+            "build-tools;29.0.3" \
+            "ndk;22.1.7171670"
+
+      - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm gcc binutils grub-pc-bin grub-common xorriso mtools
 
-      - name: Generate sources
+          sudo apt-get install -y \
+            git make autoconf automake \
+            libtool libtool-bin libltdl-dev \
+            pkg-config flex bison gettext \
+            texinfo rsync python3 binutils \
+            patch wget curl unzip xz-utils \
+            build-essential g++-multilib \
+            ninja-build
+
+      - name: Download QEMU and dependencies
+        shell: bash
         run: |
-          mkdir -p build iso/boot/grub src
+          cd /tmp
 
-          cat > src/linker.ld << 'EOF'
-          ENTRY(_start)
-          SECTIONS
-          {
-            . = 1M;
-            .multiboot : { *(.multiboot) }
-            .text : { *(.text*) }
-            .rodata : { *(.rodata*) }
-            .data : { *(.data*) }
-            .bss : { *(COMMON) *(.bss*) }
+          curl -fL --retry 5 \
+            https://download.qemu.org/qemu-5.1.0.tar.xz \
+            -o qemu.tar.xz
+
+          tar -xf qemu.tar.xz
+
+          curl -fL --retry 5 \
+            https://download.gnome.org/sources/glib/2.56/glib-2.56.1.tar.xz \
+            -o glib.tar.xz
+
+          tar -xf glib.tar.xz
+
+          curl -fL --retry 5 \
+            https://sourceware.org/pub/libffi/libffi-3.3.tar.gz \
+            -o libffi.tar.gz
+
+          tar -xzf libffi.tar.gz
+
+          curl -fL --retry 5 \
+            https://www.cairographics.org/releases/pixman-0.40.0.tar.gz \
+            -o pixman.tar.gz
+
+          tar -xzf pixman.tar.gz
+
+          curl -fL --retry 5 \
+            https://www.libsdl.org/release/SDL2-2.0.8.tar.gz \
+            -o SDL2.tar.gz
+
+          tar -xzf SDL2.tar.gz
+
+          J="$GITHUB_WORKSPACE/limbo/limbo-android-lib/src/main/jni"
+
+          cp -a qemu-5.1.0 "$J/qemu"
+          cp -a glib-2.56.1 "$J/glib"
+          cp -a libffi-3.3 "$J/libffi"
+          cp -a pixman-0.40.0 "$J/pixman"
+          cp -a SDL2-2.0.8 "$J/SDL2"
+
+      - name: Apply Limbo patches
+        run: |
+          cd limbo/limbo-android-lib/src/main/jni
+
+          patch -d qemu -p1 < patches/qemu-5.1.0.patch
+          patch -d glib -p1 < patches/glib-2.56.1.patch
+          patch -d SDL2 -p1 < patches/sdl2-2.0.8.patch
+
+          make clean
+
+      - name: Build BIOS
+        run: |
+          cd limbo/limbo-android-lib/src/main/jni
+
+          make -C qemu/roms bios seavgabios
+
+      - name: Build native QEMU x86_64
+        env:
+          BUILD_HOST: arm64-v8a
+          BUILD_GUEST: x86_64-softmmu
+          USE_QEMU_VERSION: 5.1.0
+          NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/22.1.7171670
+          NDK_MODULE_PATH: ${{ env.ANDROID_HOME }}/ndk/22.1.7171670/sources/
+        run: |
+          cd limbo/limbo-android-lib/src/main/jni
+
+          export PATH="$PATH:$NDK_ROOT"
+
+          make limbo BUILD_HOST=arm64-v8a
+
+      - name: Integrate DenTech automatic Android setup
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("limbo")
+
+          gradle = root / "limbo-android-x86/build.gradle"
+          java = root / "limbo-android-lib/src/main/java/com/max2idea/android/limbo/main/LimboActivity.java"
+
+          # Give the app its own package name.
+          text = gradle.read_text()
+          old = 'applicationId "com.limbo.emu.main"'
+          new = 'applicationId "com.dentech.android_emulator"'
+
+          if old not in text:
+              raise SystemExit("Cannot find Limbo applicationId")
+
+          gradle.write_text(text.replace(old, new, 1))
+
+          text = java.read_text()
+
+          # Required imports.
+          anchor = "import java.io.IOException;"
+          imports = """import java.io.InputStream;
+          import java.io.RandomAccessFile;
+          import java.net.HttpURLConnection;
+          import java.net.URL;"""
+
+          if "import java.net.HttpURLConnection;" not in text:
+              if anchor not in text:
+                  raise SystemExit("Java import anchor not found")
+              text = text.replace(anchor, anchor + "\n" + imports, 1)
+
+          # Start the first-run downloader after Limbo has initialized.
+          anchor = "        addGenericOperatingSystems();"
+          if anchor not in text:
+              raise SystemExit("onCreate anchor not found")
+
+          text = text.replace(
+              anchor,
+              anchor + "\n        bootstrapAndroid16();",
+              1
+          )
+
+          # Configure the dedicated VM after it has been created.
+          anchor = "                setArchOptions();"
+          if anchor not in text:
+              raise SystemExit("machineCreated anchor not found")
+
+          text = text.replace(
+              anchor,
+              anchor + """
+                  if (getMachine() != null &&
+                      "DenTech Android 1.6".equals(getMachine().getName())) {
+                      new Handler(Looper.getMainLooper()).postDelayed(
+                          new Runnable() {
+                              @Override
+                              public void run() {
+                                  configureAndroid16Machine();
+                              }
+                          }, 1200
+                      );
+                  }
+              """,
+              1
+          )
+
+          # Configure the same dedicated VM when it is loaded again.
+          anchor = """            case MachineLoaded:
+                  loadMachine();
+                  break;"""
+
+          replacement = """            case MachineLoaded:
+                  loadMachine();
+                  if (machine != null &&
+                      "DenTech Android 1.6".equals(machine.getName())) {
+                      new Handler(Looper.getMainLooper()).postDelayed(
+                          new Runnable() {
+                              @Override
+                              public void run() {
+                                  configureAndroid16Machine();
+                              }
+                          }, 1600
+                      );
+                  }
+                  break;"""
+
+          if anchor not in text:
+              raise SystemExit("MachineLoaded anchor not found")
+
+          text = text.replace(anchor, replacement, 1)
+
+          # First-run download and automatic VM selection.
+          methods = r'''
+          private static final String DENTECH_ANDROID_VM =
+              "DenTech Android 1.6";
+
+          private static final String DENTECH_ANDROID_URL =
+              "https://sourceforge.net/projects/android-x86/files/Release%201.6/android-x86-1.6.iso/download";
+
+          private File getDenTechAndroidDirectory() {
+              File directory = getExternalFilesDir("android");
+
+              if (directory == null) {
+                  directory = new File(getFilesDir(), "android");
+              }
+
+              if (!directory.exists() && !directory.mkdirs()) {
+                  throw new RuntimeException("Cannot create Android image directory");
+              }
+
+              return directory;
           }
-          EOF
 
-          cat > src/boot.asm << 'EOF'
-          section .multiboot
-          align 4
-          dd 0x1BADB002
-          dd 0x00000003
-          dd -(0x1BADB002 + 0x00000003)
-
-          section .text
-          global _start
-          global keyboard_isr
-          extern kmain
-          extern irq_keyboard_handler
-
-          _start:
-            cli
-            mov esp, stack_top
-            push ebx
-            push eax
-            call kmain
-            cli
-          .hang:
-            hlt
-            jmp .hang
-
-          keyboard_isr:
-            pusha
-            xor eax, eax
-            in al, 0x60
-            push eax
-            call irq_keyboard_handler
-            add esp, 4
-            mov al, 0x20
-            out 0x20, al
-            popa
-            iret
-
-          section .bss
-          align 16
-          stack_bottom:
-            resb 16384
-          stack_top:
-          EOF
-
-          cat > src/kernel.c << 'EOF'
-          #include <stdint.h>
-
-          #define VGA ((volatile uint16_t*)0xB8000)
-          #define COLOR 0x0A00
-          #define PIC1_CMD 0x20
-          #define PIC1_DATA 0x21
-          #define PIC2_CMD 0xA0
-          #define PIC2_DATA 0xA1
-          #define IDT_SIZE 256
-
-          struct idt_entry { uint16_t base_lo; uint16_t sel; uint8_t zero; uint8_t flags; uint16_t base_hi; } __attribute__((packed));
-          struct idt_ptr { uint16_t limit; uint32_t base; } __attribute__((packed));
-
-          static struct idt_entry idt[IDT_SIZE];
-          static struct idt_ptr idtp;
-          static uint32_t cursor = 0;
-          static char cmd_buf[256];
-          static uint32_t cmd_len = 0;
-
-          extern void keyboard_isr(void);
-
-          static void outb(uint16_t port, uint8_t val) { __asm__ volatile("outb %0,%1"::"a"(val),"Nd"(port)); }
-          static uint8_t inb(uint16_t port) { uint8_t r; __asm__ volatile("inb %1,%0":"=a"(r):"Nd"(port)); return r; }
-
-          static void idt_set(int i, uint32_t base, uint16_t sel, uint8_t flags) {
-            idt[i].base_lo = base & 0xFFFF;
-            idt[i].base_hi = (base >> 16) & 0xFFFF;
-            idt[i].sel = sel;
-            idt[i].zero = 0;
-            idt[i].flags = flags;
+          private File getDenTechAndroidISO() {
+              return new File(
+                  getDenTechAndroidDirectory(),
+                  "android-x86-1.6.iso"
+              );
           }
 
-          static void idt_init(void) {
-            idtp.limit = sizeof(idt) - 1;
-            idtp.base = (uint32_t)&idt;
-            for (int i = 0; i < IDT_SIZE; i++) idt_set(i, 0, 0x08, 0x8E);
-            idt_set(0x21, (uint32_t)keyboard_isr, 0x08, 0x8E);
-            __asm__ volatile("lidt %0"::"m"(idtp));
+          private boolean isValidDenTechISO(File file) {
+              if (!file.exists() || file.length() < 10 * 1024 * 1024) {
+                  return false;
+              }
+
+              try {
+                  RandomAccessFile raf = new RandomAccessFile(file, "r");
+                  raf.seek(0x8001);
+
+                  byte[] signature = new byte[5];
+                  raf.readFully(signature);
+                  raf.close();
+
+                  return "CD001".equals(
+                      new String(signature, "US-ASCII")
+                  );
+
+              } catch (Exception e) {
+                  return false;
+              }
           }
 
-          static void pic_remap(void) {
-            outb(PIC1_CMD, 0x11); outb(PIC2_CMD, 0x11);
-            outb(PIC1_DATA, 0x20); outb(PIC2_DATA, 0x28);
-            outb(PIC1_DATA, 0x04); outb(PIC2_DATA, 0x02);
-            outb(PIC1_DATA, 0x01); outb(PIC2_DATA, 0x01);
-            outb(PIC1_DATA, 0xFC);
-            outb(PIC2_DATA, 0xFF);
-            inb(PIC1_DATA);
+          private void bootstrapAndroid16() {
+              new Thread(new Runnable() {
+                  @Override
+                  public void run() {
+                      try {
+                          File iso = getDenTechAndroidISO();
+
+                          if (!isValidDenTechISO(iso)) {
+                              File partial = new File(
+                                  iso.getParentFile(),
+                                  iso.getName() + ".part"
+                              );
+
+                              if (partial.exists()) {
+                                  partial.delete();
+                              }
+
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() {
+                                      ToastUtils.toastLong(
+                                          LimboActivity.this,
+                                          "Downloading Android x86 1.6..."
+                                      );
+                                  }
+                              });
+
+                              HttpURLConnection connection =
+                                  (HttpURLConnection) new URL(
+                                      DENTECH_ANDROID_URL
+                                  ).openConnection();
+
+                              connection.setConnectTimeout(30000);
+                              connection.setReadTimeout(60000);
+                              connection.setInstanceFollowRedirects(true);
+                              connection.setRequestProperty(
+                                  "User-Agent",
+                                  "DenTech-Android-Emulator/0.2"
+                              );
+
+                              connection.connect();
+
+                              if (connection.getResponseCode() != 200) {
+                                  throw new IOException(
+                                      "Download HTTP " +
+                                      connection.getResponseCode()
+                                  );
+                              }
+
+                              try (
+                                  InputStream input = connection.getInputStream();
+                                  FileOutputStream output =
+                                      new FileOutputStream(partial)
+                              ) {
+                                  byte[] buffer = new byte[65536];
+                                  int count;
+
+                                  while ((count = input.read(buffer)) != -1) {
+                                      output.write(buffer, 0, count);
+                                  }
+
+                                  output.getFD().sync();
+                              } finally {
+                                  connection.disconnect();
+                              }
+
+                              if (!isValidDenTechISO(partial)) {
+                                  partial.delete();
+                                  throw new IOException(
+                                      "Downloaded file is not a valid ISO"
+                                  );
+                              }
+
+                              if (iso.exists() && !iso.delete()) {
+                                  throw new IOException(
+                                      "Cannot replace old ISO"
+                                  );
+                              }
+
+                              if (!partial.renameTo(iso)) {
+                                  throw new IOException(
+                                      "Cannot save Android ISO"
+                                  );
+                              }
+                          }
+
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  waitForDenTechMachineList(0);
+                              }
+                          });
+
+                      } catch (final Exception e) {
+                          Log.e("DenTechBootstrap",
+                              "Android 1.6 setup failed", e);
+
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  ToastUtils.toastLong(
+                                      LimboActivity.this,
+                                      "Android 1.6 error: " + e.getMessage()
+                                  );
+                              }
+                          });
+                      }
+                  }
+              }).start();
           }
 
-          static void clear_screen(void) {
-            for (int i = 0; i < 80*25; i++) VGA[i] = COLOR | ' ';
-            cursor = 0;
-          }
+          private void waitForDenTechMachineList(final int attempt) {
+              if (mMachine.getAdapter() == null ||
+                  mMachine.getAdapter().getCount() < 2) {
 
-          static void putc(char c) {
-            if (c == '\n') { cursor += 80 - (cursor % 80); return; }
-            if (c == '\b') { if (cursor > 0 && (cursor % 80) != 0) { cursor--; VGA[cursor] = COLOR | ' '; } return; }
-            VGA[cursor++] = COLOR | (uint8_t)c;
-          }
+                  if (attempt < 40) {
+                      new Handler(Looper.getMainLooper()).postDelayed(
+                          new Runnable() {
+                              @Override
+                              public void run() {
+                                  waitForDenTechMachineList(attempt + 1);
+                              }
+                          }, 500
+                      );
+                  }
+                  return;
+              }
 
-          static void puts(const char* s) { while (*s) putc(*s++); }
+              int found = -1;
 
-          static int streq(const char* a, const char* b) {
-            while (*a && *b) { if (*a != *b) return 0; a++; b++; }
-            return *a == *b;
-          }
+              for (int i = 0; i < mMachine.getAdapter().getCount(); i++) {
+                  Object item = mMachine.getAdapter().getItem(i);
 
-          static int starts(const char* a, const char* b) {
-            while (*b) { if (*a != *b) return 0; a++; b++; }
-            return 1;
-          }
+                  if (DENTECH_ANDROID_VM.equals(String.valueOf(item))) {
+                      found = i;
+                      break;
+                  }
+              }
 
-          static const char kbd_map[] = {
-            0, 27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b',
-            '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
-            0,'a','s','d','f','g','h','j','k','l',';','\'','`',
-            0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '
-          };
-
-          void irq_keyboard_handler(uint32_t scancode) {
-            uint8_t code = scancode & 0xFF;
-            if (code & 0x80) return;
-            if (code >= sizeof(kbd_map)) return;
-            char c = kbd_map[code];
-            if (!c) return;
-
-            if (c == '\n') {
-              putc('\n');
-              cmd_buf[cmd_len] = 0;
-              if (cmd_len > 0) {
-                if (streq(cmd_buf, "help")) {
-                  puts("help clear echo about\n> ");
-                } else if (streq(cmd_buf, "clear")) {
-                  clear_screen();
-                  puts("> ");
-                } else if (streq(cmd_buf, "about")) {
-                  puts("myos 0.2 interactive kernel\n> ");
-                } else if (starts(cmd_buf, "echo ")) {
-                  puts(cmd_buf + 5);
-                  putc('\n');
-                  puts("> ");
-                } else {
-                  puts("unknown\n> ");
-                }
+              if (found >= 2) {
+                  mMachine.setSelection(found);
               } else {
-                puts("> ");
+                  createMachine(DENTECH_ANDROID_VM);
               }
-              cmd_len = 0;
-            } else {
-              if (cmd_len < 255) {
-                putc(c);
-                cmd_buf[cmd_len++] = c;
+          }
+
+          private void configureAndroid16Machine() {
+              if (getMachine() == null ||
+                  !DENTECH_ANDROID_VM.equals(getMachine().getName())) {
+                  return;
               }
-            }
+
+              File iso = getDenTechAndroidISO();
+
+              if (!isValidDenTechISO(iso)) {
+                  return;
+              }
+
+              setUserPressed(true);
+
+              // Attach the downloaded ISO to the CD-ROM.
+              updateDrive(FileType.CDROM, iso.getAbsolutePath());
+
+              // Enable the CD-ROM.
+              if (!mCDenable.isChecked()) {
+                  mCDenable.setChecked(true);
+              }
+
+              // Boot from CD-ROM.
+              int bootPosition =
+                  ((ArrayAdapter<?>) mBootDevices.getAdapter())
+                      .getPosition("CDROM");
+
+              if (bootPosition >= 0) {
+                  mBootDevices.setSelection(bootPosition);
+              }
+
+              ToastUtils.toastLong(
+                  LimboActivity.this,
+                  "Android 1.6 is ready. Press START."
+              );
           }
+          '''
 
-          void kmain(uint32_t magic, uint32_t addr) {
-            (void)magic; (void)addr;
-            clear_screen();
-            idt_init();
-            pic_remap();
-            __asm__ volatile("sti");
-            puts("myos 0.2\n> ");
-            for (;;) __asm__ volatile("hlt");
-          }
-          EOF
+          anchor = "    private void setupAppEnvironment() {"
 
-          cat > iso/boot/grub/grub.cfg << 'EOF'
-          set timeout=0
-          set default=0
-          menuentry "myos" {
-            multiboot /boot/kernel.elf
-            boot
-          }
-          EOF
+          if anchor not in text:
+              raise SystemExit("Cannot find setupAppEnvironment anchor")
 
-      - name: Compile
+          text = text.replace(anchor, methods + "\n" + anchor, 1)
+
+          java.write_text(text)
+
+          print("DenTech integration applied")
+          PY
+
+      - name: Verify source modifications
         run: |
-          nasm -f elf32 src/boot.asm -o build/boot.o
-          gcc -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-exceptions -fno-rtti -c src/kernel.c -o build/kernel.o
-          ld -m elf_i386 -n -T src/linker.ld -o build/kernel.elf build/boot.o build/kernel.o
+          grep -q 'com.dentech.android_emulator' \
+            limbo/limbo-android-x86/build.gradle
 
-      - name: Verify multiboot
+          grep -q 'bootstrapAndroid16();' \
+            limbo/limbo-android-lib/src/main/java/com/max2idea/android/limbo/main/LimboActivity.java
+
+          grep -q 'configureAndroid16Machine' \
+            limbo/limbo-android-lib/src/main/java/com/max2idea/android/limbo/main/LimboActivity.java
+
+      - name: Build APK
         run: |
-          grub-file --is-x86-multiboot build/kernel.elf
+          cd limbo
 
-      - name: Create ISO
+          chmod +x gradlew
+
+          ./gradlew \
+            :limbo-android-x86:assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Verify APK
         run: |
-          cp build/kernel.elf iso/boot/kernel.elf
-          grub-mkrescue -o myos.iso iso
+          mkdir -p output
 
-      - uses: actions/upload-artifact@v4
+          APK=$(find limbo/limbo-android-x86/build/outputs/apk \
+            -type f -name "*.apk" | head -n 1)
+
+          test -n "$APK"
+          test -f "$APK"
+
+          unzip -l "$APK" > output/apk_contents.txt
+
+          grep -q "libqemu-system-x86_64.so" \
+            output/apk_contents.txt
+
+          cp "$APK" output/DenTech-Android-Emulator-Alpha-0.2.apk
+
+          sha256sum output/*.apk > output/SHA256SUMS.txt
+
+      - name: Upload Alpha 0.2
+        uses: actions/upload-artifact@v4
         with:
-          name: myos-iso
-          path: myos.iso
+          name: DenTech-Android-Emulator-Alpha-0.2
+          path: |
+            output/DenTech-Android-Emulator-Alpha-0.2.apk
+            output/apk_contents.txt
+            output/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
